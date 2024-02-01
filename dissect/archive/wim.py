@@ -454,21 +454,3 @@ class CompressedStream(AlignedStream):
 def _ts_to_ns(ts: int) -> int:
     """Convert Windows timestamps to nanosecond timestamps."""
     return (ts * 100) - 11644473600000000000
-
-
-if __name__ == "__main__":
-    import sys
-
-    from dissect.cstruct import dumpstruct
-
-    with open(sys.argv[1], "rb") as fh:
-        wim = WIM(fh)
-        dumpstruct(wim.header)
-
-        # for image in wim.images():
-        #     dumpstruct(image.root.entry)
-
-        from IPython import embed
-
-        print()
-        embed(colors="Linux")
