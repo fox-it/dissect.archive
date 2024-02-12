@@ -207,11 +207,11 @@ class DirectoryEntry:
         self.extra = None
 
         if length := self.entry.FileNameLength:
-            self.name = _read_name(length)
+            self.name = _read_name(fh, length)
             fh.read(2)
 
         if length := self.entry.ShortNameLength:
-            self.short_name = _read_name(length)
+            self.short_name = _read_name(fh, length)
             fh.read(2)
 
         # If there's any trailing data after the aligned end, read it and store it
@@ -230,7 +230,7 @@ class DirectoryEntry:
                 name = ""
                 stream = c_wim._STREAMENTRY(fh)
                 if name_length := stream.StreamNameLength:
-                    name = _read_name(name_length)
+                    name = _read_name(fh, name_length)
                     name_length += 2
                     fh.read(2)
 
