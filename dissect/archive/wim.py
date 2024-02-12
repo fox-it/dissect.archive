@@ -30,7 +30,10 @@ DEFAULT_CHUNK_SIZE = 32 * 1024
 
 
 class WIM:
-    """"""
+    """Windows Imaging Format implementation.
+
+    Supports reading resources and browsing images from WIM files.
+    """
 
     def __init__(self, fh: BinaryIO):
         self.fh = fh
@@ -73,7 +76,16 @@ class WIM:
 
 
 class Resource:
-    __slots__ = ("wim", "size", "flags", "offset", "original_size", "part_number", "reference_count", "hash")
+    __slots__ = (
+        "wim",
+        "size",
+        "flags",
+        "offset",
+        "original_size",
+        "part_number",
+        "reference_count",
+        "hash",
+    )
 
     def __init__(
         self,
@@ -195,13 +207,14 @@ class DirectoryEntry:
         self.extra = None
 
         if length := self.entry.FileNameLength:
-            self.name = fh.read(length).decode("utf-16-le")
+            self.name = _read_name(length)
             fh.read(2)
 
         if length := self.entry.ShortNameLength:
-            self.short_name = fh.read(length).decode("utf-16-le")
+            self.short_name = _read_name(length)
             fh.read(2)
 
+        # If there's any trailing data after the aligned end, read it and store it
         end = fh.tell()
         if (length := self.entry.Length - (((end + 7) & (-8)) - start)) > 0 or (
             length := self.entry.Length - (end - start)
@@ -211,12 +224,13 @@ class DirectoryEntry:
         self.streams = {}
         if self.entry.Streams:
             for _ in range(self.entry.Streams):
+                # Stream entries are 8 byte aligned
                 fh.seek((fh.tell() + 7) & (-8))
 
                 name = ""
                 stream = c_wim._STREAMENTRY(fh)
                 if name_length := stream.StreamNameLength:
-                    name = fh.read(name_length).decode("utf-16-le")
+                    name = _read_name(name_length)
                     name_length += 2
                     fh.read(2)
 
@@ -404,7 +418,7 @@ class CompressedStream(AlignedStream):
 
         # Read the chunk table in advance
         fh.seek(self.offset)
-        num_chunks = (original_size + (32 * 1024) - 1) // (32 * 1024) - 1
+        num_chunks = (original_size + DEFAULT_CHUNK_SIZE - 1) // DEFAULT_CHUNK_SIZE - 1
         if num_chunks == 0:
             self._chunks = (0,)
         else:
@@ -454,3 +468,7 @@ class CompressedStream(AlignedStream):
 def _ts_to_ns(ts: int) -> int:
     """Convert Windows timestamps to nanosecond timestamps."""
     return (ts * 100) - 11644473600000000000
+
+
+def _read_name(fh: BinaryIO, length: int) -> str:
+    fh.read(length).decode("utf-16-le")
