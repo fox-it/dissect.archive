@@ -471,4 +471,4 @@ def _ts_to_ns(ts: int) -> int:
 
 
 def _read_name(fh: BinaryIO, length: int) -> str:
-    fh.read(length).decode("utf-16-le")
+    return fh.read(length).decode("utf-16-le")
