@@ -161,6 +161,9 @@ class Image:
         fh.seek(offset + (-offset & 7))
         self.root = DirectoryEntry(self, fh)
 
+    def __repr__(self) -> str:
+        return "<Image>"
+
     def get(self, path: str, entry: Optional[DirectoryEntry] = None) -> DirectoryEntry:
         # Programmatically we will often use the `/` separator, so replace it with the native path separator of NTFS
         # `/` is an illegal character in NTFS filenames, so it's safe to replace
@@ -168,15 +171,24 @@ class Image:
 
         parts = search_path.split("\\")
         entry = entry or self.root
+        prev_entry = None
 
         for part in parts:
-            if not part:
+            if not part or part == ".":
                 continue
 
+            if part == "..":
+                entry = prev_entry or self.root
+                continue
+
+            while entry.is_symlink():
+                entry = self.get(entry.readlink(), prev_entry)
+
             # Traverse to the target path from our root node
-            for entry in entry.iterdir():
-                if entry.name == part:
-                    entry = entry
+            for subentry in entry.iterdir():
+                if subentry.name == part:
+                    prev_entry = entry
+                    entry = subentry
                     break
             else:
                 raise FileNotFoundError(f"File not found: {path}")
@@ -276,6 +288,9 @@ class DirectoryEntry:
 
         return ReparsePoint(self.entry.ReparseTag, self.open())
 
+    def readlink(self) -> str:
+        return self.reparse_point.substitute_name
+
     def size(self, name: str = "") -> int:
         """Return the entry size."""
         with self.open(name) as fh:
@@ -370,7 +385,7 @@ class ReparsePoint:
 
     @property
     def substitute_name(self) -> Optional[str]:
-        if not self.tag_header:
+        if not self.info:
             return None
 
         offset = self.info.SubstituteNameOffset
@@ -424,7 +439,9 @@ class CompressedStream(AlignedStream):
         else:
             entry_size = "Q" if original_size > 0xFFFFFFFF else "I"
             pattern = f"<{num_chunks}{entry_size}"
-            self._chunks = struct.unpack(pattern, fh.read(struct.calcsize(pattern)))
+            self._chunks = (0,) + struct.unpack(pattern, fh.read(struct.calcsize(pattern)))
+
+        self._data_offset = fh.tell()
 
         self._read_chunk = lru_cache(32)(self._read_chunk)
         super().__init__(self.original_size)
@@ -460,7 +477,7 @@ class CompressedStream(AlignedStream):
         return b"".join(result)
 
     def _read_chunk(self, offset: int, size: int) -> bytes:
-        self.fh.seek(self.offset + offset)
+        self.fh.seek(self._data_offset + offset)
         buf = self.fh.read(size)
         return self.decompressor(buf)
 

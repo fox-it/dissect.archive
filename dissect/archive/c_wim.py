@@ -168,7 +168,7 @@ flag HEADER_FLAG : DWORD {
 #define VERSION_DEFAULT     0x10d00
 
 typedef struct _WIMHEADER_V1_PACKED {
-    CHAR                    ImageTag[8];        // "MSWIM\0\0"
+    CHAR                    ImageTag[8];        // "MSWIM\\0\\0"
     DWORD                   Size;
     DWORD                   Version;
     HEADER_FLAG             Flags;
