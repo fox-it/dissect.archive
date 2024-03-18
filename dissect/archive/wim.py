@@ -65,9 +65,10 @@ class WIM:
 
         return table, images
 
-    def resources(self) -> Iterator[Resource]:
-        """Iterate over all resources in the WIM file."""
-        yield from self._resource_table.values()
+    @property
+    def resources(self) -> dict[bytes, Resource]:
+        """Return the table of resources in the WIM file."""
+        return self._resource_table
 
     def images(self) -> Iterator[Image]:
         """Iterate over all images in the WIM file."""
@@ -364,7 +365,7 @@ class DirectoryEntry:
         if stream_hash.strip(b"\x00") == b"":
             return BufferedStream(io.BytesIO(b""), size=0)
 
-        if resource := self.image.wim._resource_table.get(stream_hash):
+        if resource := self.image.wim.resources.get(stream_hash):
             return resource.open()
         else:
             raise FileNotFoundError(f"Unable to find resource for directory entry {self}")
