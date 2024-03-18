@@ -40,7 +40,7 @@ class WIM:
         self.header = c_wim.WIMHEADER_V1_PACKED(fh)
 
         if self.header.ImageTag != WIM_IMAGE_TAG:
-            raise InvalidHeaderError("Expected MSWIM header, got: {!r}".format(self.header.ImageTag))
+            raise InvalidHeaderError(f"Expected MSWIM header, got: {self.header.ImageTag!r}")
 
         if self.header.Version != c_wim.VERSION_DEFAULT:
             raise NotImplementedError(f"Only WIM version {c_wim.VERSION_DEFAULT:#x} is supported right now")
@@ -343,9 +343,13 @@ class DirectoryEntry:
                 break
 
             fh.seek(-8, io.SEEK_CUR)
-            yield DirectoryEntry(self.image, fh)
+            entry = DirectoryEntry(self.image, fh)
+            offset = fh.tell()
 
-            fh.seek((fh.tell() + 7) & (-8))
+            yield entry
+
+            # Align to the next 8 byte boundary
+            fh.seek((offset + 7) & (-8))
 
     def open(self, name: str = "") -> BinaryIO:
         """Return a file-like object for the contents of this directory entry.
