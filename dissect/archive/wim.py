@@ -6,7 +6,7 @@ from datetime import datetime
 from functools import cached_property, lru_cache
 from typing import BinaryIO, Callable, Iterator, Optional
 
-from dissect.util.stream import AlignedStream, RelativeStream
+from dissect.util.stream import AlignedStream, BufferedStream, RelativeStream
 from dissect.util.ts import wintimestamp
 
 from dissect.archive.c_wim import (
@@ -361,9 +361,11 @@ class DirectoryEntry:
         if stream_hash is None:
             raise FileNotFoundError(f"Stream not found in directory entry {self}: {name!r}")
 
-        for resource in self.image.wim.resources():
-            if resource.hash == stream_hash:
-                return resource.open()
+        if stream_hash.strip(b"\x00") == b"":
+            return BufferedStream(io.BytesIO(b""), size=0)
+
+        if resource := self.image.wim._resource_table.get(stream_hash):
+            return resource.open()
         else:
             raise FileNotFoundError(f"Unable to find resource for directory entry {self}")
 
