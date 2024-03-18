@@ -354,7 +354,7 @@ class DirectoryEntry:
             name: Optional alternate stream name to open.
         """
         stream_hash = self.streams.get(name)
-        if hash is None:
+        if stream_hash is None:
             raise FileNotFoundError(f"Stream not found in directory entry {self}: {name!r}")
 
         for resource in self.image.wim.resources():
