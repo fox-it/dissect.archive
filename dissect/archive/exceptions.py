@@ -6,11 +6,15 @@ class InvalidHeaderError(Error):
     pass
 
 
-class NotADirectoryError(Error):
+class FileNotFoundError(Error, FileNotFoundError):
     pass
 
 
-class FileNotFoundError(Error):
+class IsADirectoryError(Error, IsADirectoryError):
+    pass
+
+
+class NotADirectoryError(Error, NotADirectoryError):
     pass
 
 

@@ -22,3 +22,18 @@ def open_file_gz(name: str, mode: str = "rb") -> Iterator[BinaryIO]:
 @pytest.fixture
 def basic_wim() -> Iterator[BinaryIO]:
     yield from open_file_gz("data/basic.wim.gz")
+
+
+@pytest.fixture
+def basic_vma() -> Iterator[BinaryIO]:
+    yield from open_file_gz("data/test.vma.gz")
+
+
+@pytest.fixture
+def vbk9() -> Iterator[BinaryIO]:
+    yield from open_file_gz("data/test9.vbk.gz")
+
+
+@pytest.fixture
+def vbk13() -> Iterator[BinaryIO]:
+    yield from open_file_gz("data/test13.vbk.gz")
