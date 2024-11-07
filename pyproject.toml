@@ -36,10 +36,19 @@ documentation = "https://docs.dissect.tools/en/latest/projects/dissect.archive"
 repository = "https://github.com/fox-it/dissect.archive"
 
 [project.optional-dependencies]
+full = [
+    "rich",
+]
 dev = [
+    "dissect.archive[full]",
     "dissect.cstruct>=4.0.dev,<5.0.dev",
     "dissect.util>=3.0.dev,<4.0.dev",
 ]
+
+[project.scripts]
+vma-extract = "dissect.archive.tools.backup:main"
+vbk-extract = "dissect.archive.tools.backup:main"
+backup-extract = "dissect.archive.tools.backup:main"
 
 [tool.black]
 line-length = 120
