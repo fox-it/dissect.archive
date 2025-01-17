@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hashlib
 from typing import BinaryIO
 
@@ -11,7 +13,7 @@ def test_wim(basic_wim: BinaryIO) -> None:
     assert len(images) == 1
 
     image = images[0]
-    assert sorted(list(image.root.listdir().keys())) == ["ads.txt", "dir", "file.txt", "link.txt"]
+    assert sorted(image.root.listdir().keys()) == ["ads.txt", "dir", "file.txt", "link.txt"]
 
     entry = image.get("file.txt")
     assert entry.is_file()
@@ -42,7 +44,7 @@ def test_wim(basic_wim: BinaryIO) -> None:
     assert not entry.is_file()
     assert entry.is_dir()
     assert not entry.is_reparse_point()
-    assert sorted(list(entry.listdir().keys())) == ["another.txt"]
+    assert sorted(entry.listdir().keys()) == ["another.txt"]
 
     entry = image.get("dir/another.txt")
     assert entry.is_file()

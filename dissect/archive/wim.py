@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import io
 import struct
-from datetime import datetime
 from functools import cached_property, lru_cache
-from typing import BinaryIO, Callable, Iterator, Optional
+from typing import TYPE_CHECKING, BinaryIO, Callable
 
 from dissect.util.stream import AlignedStream, BufferedStream, RelativeStream
 from dissect.util.ts import wintimestamp
@@ -25,6 +24,10 @@ from dissect.archive.exceptions import (
     NotADirectoryError,
     NotAReparsePointError,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from datetime import datetime
 
 DEFAULT_CHUNK_SIZE = 32 * 1024
 
@@ -78,14 +81,14 @@ class WIM:
 
 class Resource:
     __slots__ = (
-        "wim",
-        "size",
         "flags",
+        "hash",
         "offset",
         "original_size",
         "part_number",
         "reference_count",
-        "hash",
+        "size",
+        "wim",
     )
 
     def __init__(
@@ -95,9 +98,9 @@ class Resource:
         flags: RESHDR_FLAG,
         offset: int,
         original_size: int,
-        part_number: Optional[int] = None,
-        reference_count: Optional[int] = None,
-        hash: Optional[bytes] = None,
+        part_number: int | None = None,
+        reference_count: int | None = None,
+        hash: bytes | None = None,
     ):
         self.wim = wim
         self.size = size
@@ -149,8 +152,8 @@ class Resource:
             if decompressor is None:
                 raise NotImplementedError(f"Compression algorithm not yet supported: {compression_flags}")
             return CompressedStream(self.wim.fh, self.offset, self.size, self.original_size, decompressor)
-        else:
-            return RelativeStream(self.wim.fh, self.offset, self.size)
+
+        return RelativeStream(self.wim.fh, self.offset, self.size)
 
 
 class Image:
@@ -165,7 +168,7 @@ class Image:
     def __repr__(self) -> str:
         return "<Image>"
 
-    def get(self, path: str, entry: Optional[DirectoryEntry] = None) -> DirectoryEntry:
+    def get(self, path: str, entry: DirectoryEntry | None = None) -> DirectoryEntry:
         # Programmatically we will often use the `/` separator, so replace it with the native path separator of NTFS
         # `/` is an illegal character in NTFS filenames, so it's safe to replace
         search_path = path.replace("/", "\\")
@@ -367,8 +370,8 @@ class DirectoryEntry:
 
         if resource := self.image.wim.resources.get(stream_hash):
             return resource.open()
-        else:
-            raise FileNotFoundError(f"Unable to find resource for directory entry {self}")
+
+        raise FileNotFoundError(f"Unable to find resource for directory entry {self}")
 
 
 class ReparsePoint:
@@ -391,7 +394,7 @@ class ReparsePoint:
         self._buf = fh.read()
 
     @property
-    def substitute_name(self) -> Optional[str]:
+    def substitute_name(self) -> str | None:
         if not self.info:
             return None
 
@@ -400,7 +403,7 @@ class ReparsePoint:
         return self._buf[offset : offset + length].decode("utf-16-le")
 
     @property
-    def print_name(self) -> Optional[str]:
+    def print_name(self) -> str | None:
         if not self.info:
             return None
 
@@ -446,7 +449,7 @@ class CompressedStream(AlignedStream):
         else:
             entry_size = "Q" if original_size > 0xFFFFFFFF else "I"
             pattern = f"<{num_chunks}{entry_size}"
-            self._chunks = (0,) + struct.unpack(pattern, fh.read(struct.calcsize(pattern)))
+            self._chunks = (0, *struct.unpack(pattern, fh.read(struct.calcsize(pattern))))
 
         self._data_offset = fh.tell()
 

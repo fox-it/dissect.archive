@@ -4,7 +4,7 @@ from dissect.archive import exceptions
 
 
 @pytest.mark.parametrize(
-    "exc, std",
+    ("exc", "std"),
     [
         (exceptions.FileNotFoundError, FileNotFoundError),
         (exceptions.IsADirectoryError, IsADirectoryError),

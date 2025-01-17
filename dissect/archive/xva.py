@@ -1,9 +1,16 @@
+from __future__ import annotations
+
 import hashlib
 import tarfile
 from bisect import bisect_right
+from functools import cached_property
+from typing import TYPE_CHECKING, BinaryIO
 from xml.etree import ElementTree
 
 from dissect.util.stream import AlignedStream
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 BLOCK_SIZE = 1024 * 1024
 
@@ -14,20 +21,17 @@ class XVA:
     XenCenter export format. Basically a tar file with "blocks" of 1MB.
     """
 
-    def __init__(self, fh):
+    def __init__(self, fh: BinaryIO):
         # We don't have to cache tar members, tarfile already does that for us
-        self.tar = tarfile.open(fileobj=fh)
-        self._ova = None
+        self.tar = tarfile.open(fileobj=fh)  # noqa: SIM115
 
-    @property
-    def ova(self):
-        if not self._ova:
-            ova_member = self.tar.getmember("ova.xml")
-            ova_fh = self.tar.extractfile(ova_member)
-            self._ova = ElementTree.fromstring(ova_fh.read())
-        return self._ova
+    @cached_property
+    def ova(self) -> ElementTree.Element:
+        ova_member = self.tar.getmember("ova.xml")
+        ova_fh = self.tar.extractfile(ova_member)
+        return ElementTree.fromstring(ova_fh.read())
 
-    def disks(self):
+    def disks(self) -> list[str]:
         return [
             el.text
             for el in self.ova.findall(
@@ -35,7 +39,7 @@ class XVA:
             )
         ]
 
-    def open(self, ref, verify=False):
+    def open(self, ref: str, verify: bool = False) -> XVAStream:
         size = int(
             self.ova.find(f"*//member/name[.='id']/../value[.='{ref}']/../..//name[.='virtual_size']/../value").text
         )
@@ -55,7 +59,7 @@ class XVAStream(AlignedStream):
     data for that current offset. For this reason we build a lookup list with offsets.
     """
 
-    def __init__(self, xva, ref, size, verify=False):
+    def __init__(self, xva: XVA, ref: str, size: int, verify: bool = False):
         self.xva = xva
         self.ref = ref
         self.verify = verify
@@ -79,7 +83,7 @@ class XVAStream(AlignedStream):
 
         super().__init__(size, align=BLOCK_SIZE)
 
-    def _read(self, offset, length):
+    def _read(self, offset: int, length: int) -> bytes:
         result = []
 
         while length > 0:
@@ -102,8 +106,8 @@ class XVAStream(AlignedStream):
                         and hashlib.sha1(buf).hexdigest() != self.xva.tar.extractfile(checksum_member).read().decode()
                     ):
                         raise ValueError(f"Invalid checksum for {checksum_member.name}")
-                    else:
-                        raise NotImplementedError(f"Unsupported checksum: {checksum_member.name}")
+
+                    raise NotImplementedError(f"Unsupported checksum: {checksum_member.name}")
 
                 result.append(buf)
 
@@ -113,7 +117,7 @@ class XVAStream(AlignedStream):
         return b"".join(result)
 
 
-def _iter_block_files(xva, ref):
+def _iter_block_files(xva: XVA, ref: str) -> Iterator[tuple[int, tarfile.TarInfo, tarfile.TarInfo]]:
     member_index = None
     block_member = None
     checksum_member = None

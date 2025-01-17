@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hashlib
 import struct
 from typing import BinaryIO
@@ -14,6 +16,7 @@ from dissect.archive.vbk import (
 
 
 def test_vbk_version_9(vbk9: BinaryIO) -> None:
+    """test VBK parsing for version 9 files"""
     vbk = VBK(vbk9)
 
     assert vbk.format_version == 9
@@ -49,6 +52,7 @@ def test_vbk_version_9(vbk9: BinaryIO) -> None:
 
 
 def test_vbk_version_13(vbk13: BinaryIO) -> None:
+    """test VBK parsing for version 13 files"""
     vbk = VBK(vbk13)
 
     assert vbk.format_version == 13

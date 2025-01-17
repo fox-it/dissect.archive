@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import logging
 import sys
@@ -61,9 +63,9 @@ except ImportError:
             self.draw()
 
         def draw(self) -> None:
-            infos = []
-            for info in self._info.values():
-                infos.append(f"{info['filename']} {(info['position'] / info['total']) * 100:0.2f}%")
+            infos = [
+                f"{info['filename']} {(info['position'] / info['total']) * 100:0.2f}%" for info in self._info.values()
+            ]
             sys.stderr.write("\r" + " | ".join(infos))
             sys.stderr.flush()
 
