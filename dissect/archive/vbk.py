@@ -5,10 +5,9 @@ from __future__ import annotations
 
 from functools import cached_property, lru_cache
 from io import BytesIO
-from typing import BinaryIO, Generic, Iterator, TypeVar
+from typing import TYPE_CHECKING, BinaryIO, Generic, TypeVar
 from zlib import crc32
 
-from dissect.cstruct import Structure
 from dissect.util.compression import lz4
 from dissect.util.crc32c import crc32c
 from dissect.util.stream import AlignedStream
@@ -16,6 +15,11 @@ from dissect.util.xmemoryview import xmemoryview
 
 from dissect.archive.c_vbk import PAGE_SIZE, c_vbk
 from dissect.archive.exceptions import Error
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from dissect.cstruct import Structure
 
 
 class VBKError(Error):
@@ -860,8 +864,7 @@ class MetaVector(Generic[T]):
         offset = (offset * self._entry_size) + 8
 
         buf = self.vbk.page(page)
-        entry = buf[offset : offset + self._entry_size]
-        return entry
+        return buf[offset : offset + self._entry_size]
 
     def get(self, idx: int) -> T:
         """Get an entry from the vector.
