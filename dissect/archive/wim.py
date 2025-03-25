@@ -441,11 +441,11 @@ class CompressedStream(AlignedStream):
         self.compressed_size = compressed_size
         self.original_size = original_size
         self.decompressor = decompressor
-        self.chuck_size = chunk_size
+        self.chunk_size = chunk_size
 
         # Read the chunk table in advance
         fh.seek(self.offset)
-        num_chunks = (original_size + self.chuck_size - 1) // self.chuck_size - 1
+        num_chunks = (original_size + self.chunk_size - 1) // self.chunk_size - 1
         if num_chunks == 0:
             self._chunks = (0,)
         else:
@@ -462,7 +462,7 @@ class CompressedStream(AlignedStream):
         result = []
 
         num_chunks = len(self._chunks)
-        chunk, offset_in_chunk = divmod(offset, self.chuck_size)
+        chunk, offset_in_chunk = divmod(offset, self.chunk_size)
 
         while length:
             if chunk >= num_chunks:
@@ -472,10 +472,10 @@ class CompressedStream(AlignedStream):
             chunk_offset = self._chunks[chunk]
             if chunk < num_chunks - 1:
                 next_chunk_offset = self._chunks[chunk + 1]
-                chunk_remaining = self.chuck_size - offset_in_chunk
+                chunk_remaining = self.chunk_size - offset_in_chunk
             else:
                 next_chunk_offset = self.compressed_size
-                chunk_remaining = (self.original_size - (chunk * self.chuck_size)) - offset_in_chunk
+                chunk_remaining = (self.original_size - (chunk * self.chunk_size)) - offset_in_chunk
 
             read_length = min(chunk_remaining, length)
 
