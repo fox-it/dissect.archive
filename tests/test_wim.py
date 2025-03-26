@@ -3,11 +3,25 @@ from __future__ import annotations
 import hashlib
 from typing import BinaryIO
 
+import pytest
+
 from dissect.archive.wim import WIM
 
 
-def test_wim(basic_wim: BinaryIO) -> None:
-    wim = WIM(basic_wim)
+@pytest.mark.parametrize(
+    ("fixture", "chunk_size"),
+    [
+        ("basic_wim", 0x8000),
+        ("test4k_wim", 0x1000),
+        ("test8k_wim", 0x2000),
+        ("test16k_wim", 0x4000),
+    ],
+)
+def test_wim(fixture: BinaryIO, chunk_size: int, request: pytest.FixtureRequest) -> None:
+    value = request.getfixturevalue(fixture)
+    wim = WIM(value)
+
+    assert wim.header.CompressionSize == chunk_size
 
     images = list(wim.images())
     assert len(images) == 1
