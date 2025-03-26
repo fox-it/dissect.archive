@@ -151,7 +151,9 @@ class Resource:
             decompressor = DECOMPRESSOR_MAP.get(compression_flags)
             if decompressor is None:
                 raise NotImplementedError(f"Compression algorithm not yet supported: {compression_flags}")
-            return CompressedStream(self.wim.fh, self.offset, self.size, self.original_size, decompressor)
+            return CompressedStream(
+                self.wim.fh, self.offset, self.size, self.original_size, decompressor, self.wim.header.CompressionSize
+            )
 
         return RelativeStream(self.wim.fh, self.offset, self.size)
 
@@ -485,7 +487,6 @@ class CompressedStream(AlignedStream):
             length -= read_length
             offset += read_length
             chunk += 1
-
         return b"".join(result)
 
     def _read_chunk(self, offset: int, size: int) -> bytes:
