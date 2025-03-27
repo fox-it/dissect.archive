@@ -487,6 +487,7 @@ class CompressedStream(AlignedStream):
             length -= read_length
             offset += read_length
             chunk += 1
+
         return b"".join(result)
 
     def _read_chunk(self, offset: int, size: int) -> bytes:

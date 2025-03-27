@@ -25,35 +25,35 @@ def open_file_gz(name: str, mode: str = "rb") -> Iterator[BinaryIO]:
 
 
 @pytest.fixture
-def basic_wim() -> Iterator[BinaryIO]:
-    yield from open_file_gz("data/basic.wim.gz")
+def basic_wim_4k() -> Iterator[BinaryIO]:
+    yield from open_file_gz("_data/basic4k.wim.gz")
 
 
 @pytest.fixture
-def test4k_wim() -> Iterator[BinaryIO]:
-    yield from open_file_gz("data/test4k.wim.gz")
+def basic_wim_8k() -> Iterator[BinaryIO]:
+    yield from open_file_gz("_data/basic8k.wim.gz")
 
 
 @pytest.fixture
-def test8k_wim() -> Iterator[BinaryIO]:
-    yield from open_file_gz("data/test8k.wim.gz")
+def basic_wim_16k() -> Iterator[BinaryIO]:
+    yield from open_file_gz("_data/basic16k.wim.gz")
 
 
 @pytest.fixture
-def test16k_wim() -> Iterator[BinaryIO]:
-    yield from open_file_gz("data/test16k.wim.gz")
+def basic_wim_32k() -> Iterator[BinaryIO]:
+    yield from open_file_gz("_data/basic32k.wim.gz")
 
 
 @pytest.fixture
 def basic_vma() -> Iterator[BinaryIO]:
-    yield from open_file_gz("data/test.vma.gz")
+    yield from open_file_gz("_data/test.vma.gz")
 
 
 @pytest.fixture
 def vbk9() -> Iterator[BinaryIO]:
-    yield from open_file_gz("data/test9.vbk.gz")
+    yield from open_file_gz("_data/test9.vbk.gz")
 
 
 @pytest.fixture
 def vbk13() -> Iterator[BinaryIO]:
-    yield from open_file_gz("data/test13.vbk.gz")
+    yield from open_file_gz("_data/test13.vbk.gz")
