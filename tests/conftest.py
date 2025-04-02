@@ -25,6 +25,21 @@ def open_file_gz(name: str, mode: str = "rb") -> Iterator[BinaryIO]:
 
 
 @pytest.fixture
+def uncompressed_wim() -> Iterator[BinaryIO]:
+    yield from open_file_gz("_data/uncompressed.wim.gz")
+
+
+@pytest.fixture
+def lzms_wim() -> Iterator[BinaryIO]:
+    yield from open_file_gz("_data/lzms.wim.gz")
+
+
+@pytest.fixture
+def lzx_wim() -> Iterator[BinaryIO]:
+    yield from open_file_gz("_data/lzx.wim.gz")
+
+
+@pytest.fixture
 def basic_wim_4k() -> Iterator[BinaryIO]:
     yield from open_file_gz("_data/basic4k.wim.gz")
 
