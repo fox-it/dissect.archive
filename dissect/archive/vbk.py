@@ -14,7 +14,7 @@ from dissect.util.stream import AlignedStream
 from dissect.util.xmemoryview import xmemoryview
 
 from dissect.archive.c_vbk import PAGE_SIZE, c_vbk
-from dissect.archive.exceptions import Error
+from dissect.archive.exceptions import Error, FileNotFoundError, IsADirectoryError, NotADirectoryError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -23,14 +23,6 @@ if TYPE_CHECKING:
 
 
 class VBKError(Error):
-    pass
-
-
-class NotAFileError(VBKError):
-    pass
-
-
-class NotADirectoryError(VBKError):
     pass
 
 
@@ -366,7 +358,7 @@ class DirItem(MetaItem):
 
     def open(self) -> BinaryIO:
         """Open the file for reading."""
-        raise NotAFileError(f"{self!r} is not a file")
+        raise IsADirectoryError(f"{self!r} is not a file")
 
 
 class RootDirectory(DirItem):
