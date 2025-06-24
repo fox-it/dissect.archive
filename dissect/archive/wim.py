@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import io
 import struct
-from functools import cached_property, lru_cache
-from typing import TYPE_CHECKING, BinaryIO, Callable
+from functools import cached_property
+from typing import TYPE_CHECKING, BinaryIO
 
-from dissect.util.stream import AlignedStream, BufferedStream, RelativeStream
+from dissect.util.stream import BufferedStream, CompressedStream, RelativeStream
 from dissect.util.ts import wintimestamp
 
 from dissect.archive.c_wim import (
@@ -84,10 +84,10 @@ class Resource:
         "flags",
         "hash",
         "offset",
-        "original_size",
+        "original_size", # uncompressed size of the resource
         "part_number",
         "reference_count",
-        "size",
+        "size",  # Compressed size of the resource
         "wim",
     )
 
@@ -151,7 +151,7 @@ class Resource:
             decompressor = DECOMPRESSOR_MAP.get(compression_flags)
             if decompressor is None:
                 raise NotImplementedError(f"Compression algorithm not yet supported: {compression_flags}")
-            return CompressedStream(
+            return WimCompressedStream(
                 self.wim.fh, self.offset, self.size, self.original_size, decompressor, self.wim.header.CompressionSize
             )
 
@@ -428,74 +428,6 @@ class ReparsePoint:
         return self.info.Flags == SYMLINK_FLAG.RELATIVE
 
 
-class CompressedStream(AlignedStream):
-    def __init__(
-        self,
-        fh: BinaryIO,
-        offset: int,
-        compressed_size: int,
-        original_size: int,
-        decompressor: Callable[[bytes], bytes],
-        chunk_size: int = DEFAULT_CHUNK_SIZE,
-    ):
-        self.fh = fh
-        self.offset = offset
-        self.compressed_size = compressed_size
-        self.original_size = original_size
-        self.decompressor = decompressor
-        self.chunk_size = chunk_size
-
-        # Read the chunk table in advance
-        fh.seek(self.offset)
-        num_chunks = (original_size + self.chunk_size - 1) // self.chunk_size - 1
-        if num_chunks == 0:
-            self._chunks = (0,)
-        else:
-            entry_size = "Q" if original_size > 0xFFFFFFFF else "I"
-            pattern = f"<{num_chunks}{entry_size}"
-            self._chunks = (0, *struct.unpack(pattern, fh.read(struct.calcsize(pattern))))
-
-        self._data_offset = fh.tell()
-
-        self._read_chunk = lru_cache(32)(self._read_chunk)
-        super().__init__(self.original_size)
-
-    def _read(self, offset: int, length: int) -> bytes:
-        result = []
-
-        num_chunks = len(self._chunks)
-        chunk, offset_in_chunk = divmod(offset, self.chunk_size)
-
-        while length:
-            if chunk >= num_chunks:
-                # We somehow requested more data than we have runs for
-                break
-
-            chunk_offset = self._chunks[chunk]
-            if chunk < num_chunks - 1:
-                next_chunk_offset = self._chunks[chunk + 1]
-                chunk_remaining = self.chunk_size - offset_in_chunk
-            else:
-                next_chunk_offset = self.compressed_size
-                chunk_remaining = (self.original_size - (chunk * self.chunk_size)) - offset_in_chunk
-
-            read_length = min(chunk_remaining, length)
-
-            buf = self._read_chunk(chunk_offset, next_chunk_offset - chunk_offset)
-            result.append(buf[offset_in_chunk : offset_in_chunk + read_length])
-
-            length -= read_length
-            offset += read_length
-            chunk += 1
-
-        return b"".join(result)
-
-    def _read_chunk(self, offset: int, size: int) -> bytes:
-        self.fh.seek(self._data_offset + offset)
-        buf = self.fh.read(size)
-        return self.decompressor(buf)
-
-
 def _ts_to_ns(ts: int) -> int:
     """Convert Windows timestamps to nanosecond timestamps."""
     return (ts * 100) - 11644473600000000000
@@ -503,3 +435,53 @@ def _ts_to_ns(ts: int) -> int:
 
 def _read_name(fh: BinaryIO, length: int) -> str:
     return fh.read(length).decode("utf-16-le")
+
+
+class WimCompressedStream(CompressedStream):
+    """Compressed stream for Windows Imaging (WIM) archives. This class handles the decompression of WIM archives
+    using the specified decompressor.
+
+    Supported decompression methods are currently:
+        * LZXPRESS4K Huffman
+        * LZXPRESS8K Huffman
+        * LZXPRESS16K Huffman
+        * LZXPRESS32K Huffman (default)
+
+    Note that LZX decompression is not yet supported.
+
+    Args:
+        fh: A file-like object for the compressed data.
+        offset: The offset to the start of the chunk table.
+        size: The size of the compressed data.
+        original_size: The original size of the uncompressed data.
+        decompress: The decompressor function to use.
+        chunk_size: The size of the chunks to read from the compressed data. (default: 32 KiB)
+    """
+
+    def __init__(
+        self,
+        fh: BinaryIO,
+        offset: int,
+        size: int,
+        original_size: int,
+        decompress: callable,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+    ):
+        fh.seek(offset)
+        num_chunks = (original_size + chunk_size - 1) // chunk_size - 1
+
+        entry_size = "Q" if original_size > 0xFFFFFFFF else "I"
+        pattern = f"<{num_chunks}{entry_size}"
+        chunks = (0, *struct.unpack(pattern, fh.read(struct.calcsize(pattern))))
+
+        super().__init__(fh, fh.tell(), size, original_size, decompress, chunk_size, chunks)
+
+    def _read_chunk(self, offset: int, size: int) -> bytes:
+        self.fh.seek(self.offset + offset)
+        buf = self.fh.read(size)
+
+        uncompressed_size = (
+            ((self.original_size - 1) & (self.chunk_size - 1)) + 1 if offset == self.chunks[-1] else self.chunk_size
+        )
+
+        return buf if len(buf) == uncompressed_size else self.decompressor(buf)

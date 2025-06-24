@@ -6,7 +6,7 @@ from typing import BinaryIO
 import pytest
 from dissect.util.compression.lzxpress_huffman import decompress
 
-from dissect.archive.wim import WIM, CompressedStream
+from dissect.archive.wim import WIM, WimCompressedStream
 
 
 @pytest.mark.parametrize(
@@ -16,19 +16,24 @@ from dissect.archive.wim import WIM, CompressedStream
         ("basic_wim_8k", 0x2000),
         ("basic_wim_16k", 0x4000),
         ("basic_wim_32k", 0x8000),
+        ("uncompressed_wim", 0),
     ],
 )
 def test_wim(fixture: BinaryIO, chunk_size: int, request: pytest.FixtureRequest) -> None:
     value = request.getfixturevalue(fixture)
     wim = WIM(value)
+
     assert wim.header.CompressionSize == chunk_size
 
-    resource = next(iter(wim.resources.values()))
-    assert resource.open().chunk_size == chunk_size
+    if chunk_size:
+        resource = next(iter(wim.resources.values()))
+        assert resource.open().chunk_size == chunk_size
 
-    stream = CompressedStream(wim.fh, resource.offset, resource.size, resource.original_size, decompress, chunk_size)
-    assert resource.wim.header.CompressionSize == stream.chunk_size
-    assert resource.open().read() == stream.read()
+        stream = WimCompressedStream(
+            wim.fh, resource.offset, resource.size, resource.original_size, decompress, chunk_size
+        )
+        assert resource.wim.header.CompressionSize == stream.chunk_size
+        assert resource.open().read() == stream.read()
 
     images = list(wim.images())
     assert len(images) == 1
@@ -74,3 +79,17 @@ def test_wim(fixture: BinaryIO, chunk_size: int, request: pytest.FixtureRequest)
     assert len(entry.streams) == 1
     assert entry.size() == 60
     assert hashlib.sha1(entry.open().read()).hexdigest() == "1fc83a896287fe48f6d42d8d04f88f6dc90c0c45"
+
+
+@pytest.mark.parametrize(
+    ("fixture"),
+    [
+        ("lzms_wim"),
+        ("lzx_wim"),
+    ],
+)
+def test_wim_not_implemented(fixture: BinaryIO, request: pytest.FixtureRequest) -> None:
+    data = request.getfixturevalue(fixture)
+
+    with pytest.raises(NotImplementedError):
+        WIM(data)._images[0].open()
