@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, BinaryIO, Generic, TypeVar
 from zlib import crc32
 
 from dissect.util.compression import lz4
-from dissect.util.crc32c import crc32c
+from dissect.util.hash.crc32c import crc32c
 from dissect.util.stream import AlignedStream
 from dissect.util.xmemoryview import xmemoryview
 
