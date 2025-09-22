@@ -61,7 +61,7 @@ class VMA:
             blob_offset += size + 2
 
         self._config: dict[str, bytes] = {}
-        for conf_name, conf_data in zip(self.header.config_names, self.header.config_data):
+        for conf_name, conf_data in zip(self.header.config_names, self.header.config_data, strict=False):
             if (conf_name, conf_data) == (0, 0):
                 continue
 
@@ -179,7 +179,7 @@ class Extent:
             elif mask == 0:
                 pass
             else:
-                block_offset += bin(mask).count("1") * c_vma.VMA_BLOCK_SIZE
+                block_offset += mask.bit_count() * c_vma.VMA_BLOCK_SIZE
 
     def __repr__(self) -> str:
         return f"<Extent offset=0x{self.offset:x} size=0x{self.size:x}>"

@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import struct
 from functools import cached_property, lru_cache
-from typing import TYPE_CHECKING, BinaryIO, Callable
+from typing import TYPE_CHECKING, BinaryIO
 
 from dissect.util.stream import AlignedStream, BufferedStream, RelativeStream
 from dissect.util.ts import wintimestamp
@@ -26,7 +26,7 @@ from dissect.archive.exceptions import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from datetime import datetime
 
 DEFAULT_CHUNK_SIZE = 32 * 1024
