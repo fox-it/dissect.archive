@@ -45,6 +45,26 @@ dev = [
     "dissect.util>=3.22.dev,<4.0.dev", #TODO: Remove once we release a new version
 ]
 
+[dependency-groups]
+test = [
+    "pytest",
+]
+lint = [
+    "ruff==0.13.1",
+    "vermin",
+]
+build = [
+    "build",
+]
+debug = [
+    "ipdb",
+]
+dev = [
+    {include-group = "test"},
+    {include-group = "lint"},
+    {include-group = "debug"},
+]
+
 [project.scripts]
 vma-extract = "dissect.archive.tools.backup:main"
 vbk-extract = "dissect.archive.tools.backup:main"
