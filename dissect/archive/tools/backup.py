@@ -4,10 +4,14 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from dissect.archive.c_vma import c_vma
-from dissect.archive.vbk import VBK, DirItem
+from dissect.archive.vbk import VBK
 from dissect.archive.vma import VMA, _iter_mask
+
+if TYPE_CHECKING:
+    from dissect.archive.vbk import DirItem
 
 try:
     from rich.logging import RichHandler
