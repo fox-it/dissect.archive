@@ -907,7 +907,6 @@ class MetaVector2(MetaVector[T]):
         Args:
             idx: The page index to lookup the page number for.
         """
-
         # MetaVec2 pages are a little special
         # The first page has a 16 byte header:
         # - 8 bytes for the next page number

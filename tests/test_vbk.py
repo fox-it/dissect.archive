@@ -16,7 +16,7 @@ from dissect.archive.vbk import (
 
 
 def test_vbk_version_9(vbk9: BinaryIO) -> None:
-    """test VBK parsing for version 9 files"""
+    """Test VBK parsing for version 9 files."""
     vbk = VBK(vbk9)
 
     assert vbk.format_version == 9
@@ -52,7 +52,7 @@ def test_vbk_version_9(vbk9: BinaryIO) -> None:
 
 
 def test_vbk_version_13(vbk13: BinaryIO) -> None:
-    """test VBK parsing for version 13 files"""
+    """Test VBK parsing for version 13 files."""
     vbk = VBK(vbk13)
 
     assert vbk.format_version == 13
@@ -89,8 +89,7 @@ def test_vbk_version_13(vbk13: BinaryIO) -> None:
 
 
 def test_metavector2_lookup() -> None:
-    """test that the lookup logic in MetaVector2 works as expected"""
-
+    """Test that the lookup logic in MetaVector2 works as expected."""
     raw_blob = []
     entry = 0
     num_pages = 11
