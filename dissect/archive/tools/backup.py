@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -98,8 +99,8 @@ def setup_logging(logger: logging.Logger, verbosity: int) -> None:
     logger.setLevel(level)
 
 
-def extract_vma(vma: VMA, out_dir: Path) -> None:
-    log.info("Extracting config files")
+def extract_vma(vma: VMA, out_dir: Path, sparse: bool) -> None:
+    log.info("Extracting config file(s)")
     for config_name, config_data in vma.configs().items():
         out_file = out_dir.joinpath(config_name)
 
@@ -132,13 +133,19 @@ def extract_vma(vma: VMA, out_dir: Path) -> None:
                     if mask == 0xFFFF:
                         fh_out.write(vma.fh.read(c_vma.VMA_CLUSTER_SIZE))
                     elif mask == 0:
-                        fh_out.write(b"\x00" * c_vma.VMA_CLUSTER_SIZE)
+                        if sparse:
+                            fh_out.seek(c_vma.VMA_CLUSTER_SIZE, os.SEEK_CUR)
+                        else:
+                            fh_out.write(b"\x00" * c_vma.VMA_CLUSTER_SIZE)
                     else:
                         for allocated, count in _iter_mask(mask, 16):
                             if allocated:
                                 fh_out.write(vma.fh.read(count * c_vma.VMA_BLOCK_SIZE))
                             else:
-                                fh_out.write(b"\x00" * count * c_vma.VMA_BLOCK_SIZE)
+                                if sparse:
+                                    fh_out.seek(count * c_vma.VMA_BLOCK_SIZE, os.SEEK_CUR)
+                                else:
+                                    fh_out.write(b"\x00" * count * c_vma.VMA_BLOCK_SIZE)
 
                     progress.update(tasks[dev_id], advance=c_vma.VMA_CLUSTER_SIZE)
         except Exception as e:
@@ -149,7 +156,7 @@ def extract_vma(vma: VMA, out_dir: Path) -> None:
                 handle.close()
 
 
-def extract_vbk(vbk: VBK, out_dir: Path) -> None:
+def extract_vbk(vbk: VBK, out_dir: Path, sparse: bool) -> None:
     def extract_directory(directory: DirItem, out_dir: Path) -> None:
         out_dir.mkdir(exist_ok=True)
         for entry in directory.iterdir():
@@ -175,17 +182,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Hypervisor backup extractor")
     parser.add_argument("input", type=Path, help="path to backup file")
     parser.add_argument("-o", "--output", type=Path, required=True, help="path to output directory")
+    parser.add_argument("--sparse", action="store_true", help="create sparse output files (only supports VMA)")
     parser.add_argument("-v", "--verbose", action="count", default=3, help="increase output verbosity")
     args = parser.parse_args()
 
     setup_logging(log, args.verbose)
 
-    in_file = args.input.resolve()
+    in_file: Path = args.input.resolve()
     if not in_file.exists():
         log.error("Input file does not exist: %s", in_file)
         parser.exit()
 
-    out_dir = args.output.resolve()
+    out_dir: Path = args.output.resolve()
     if not out_dir.exists():
         log.error("Output path does not exist: %s", out_dir)
         parser.exit()
@@ -198,7 +206,7 @@ def main() -> None:
         for klass, extract in ((VMA, extract_vma), (VBK, extract_vbk)):
             try:
                 backup = klass(fh)
-                extract(backup, out_dir)
+                extract(backup, out_dir, args.sparse)
                 break
             except Exception as e:
                 log.debug("Failed to extract using %s", klass.__name__, exc_info=e)
