@@ -7,7 +7,7 @@ import pytest
 
 from dissect.archive.tibx.c_tibx import SLICE_DELETED, c_tibx
 from dissect.archive.tibx.exception import InvalidArchiveError
-from dissect.archive.tibx.tibx import TIBX
+from dissect.archive.tibx.tibx import TIBX, RecoveryPoint
 from tests._tools.tibx._synth import (
     PAGE,
     Cell,
@@ -211,3 +211,96 @@ def test_latest_keeps_the_extents_when_none_is_newer() -> None:
 
     tibx.use_recovery_point(1)
     assert tibx.extents is not tibx._unfiltered_extents()
+
+
+def test_select_by_guid() -> None:
+    # A GUID names a backup for good, where an index shifts once older backups are deleted
+    tibx = _chain()
+    guid = tibx.recovery_points()[1].guid
+
+    for selector in (guid, str(guid), str(guid).upper(), f"{{{guid}}}", guid.hex):
+        tibx.use_recovery_point(selector)
+        assert tibx.recovery_point.slice_id == 3
+        assert {extent.slice_id for extent in tibx.extents} == {2, 3}
+
+
+def test_unknown_guid() -> None:
+    tibx = _chain()
+    with pytest.raises(InvalidArchiveError, match="no recovery point with GUID"):
+        tibx.use_recovery_point(uuid.UUID(int=0))
+
+
+def test_malformed_guid() -> None:
+    tibx = _chain()
+    with pytest.raises(InvalidArchiveError, match="invalid recovery point"):
+        tibx.use_recovery_point("not-a-guid-but-long-enough-to-look-like-one")
+
+
+def test_selected_recovery_point() -> None:
+    tibx = _chain()
+    points = tibx.recovery_points()
+
+    # "latest" reflects the newest backup that has finished
+    assert tibx.recovery_point is points[-1]
+
+    tibx.use_recovery_point(0)
+    assert tibx.recovery_point is points[0]
+
+    tibx.use_recovery_point("oldest")
+    assert tibx.recovery_point is points[0]
+
+    tibx.use_recovery_point("latest")
+    assert tibx.recovery_point is points[-1]
+
+
+def test_selected_recovery_point_with_one_not_finished() -> None:
+    tibx = _with_records(RECORDS)
+    points = tibx.recovery_points()
+    assert tibx.recovery_point is points[1]
+
+    tibx.use_recovery_point(2)
+    assert tibx.recovery_point is points[2]
+
+
+def test_selected_recovery_point_without_a_finished_backup() -> None:
+    tibx = _with_records([(2, c_tibx.SliceType.FULL, 0, b"\x02" * 16)])
+    assert tibx.recovery_point is None
+
+
+def test_selected_recovery_point_without_slices() -> None:
+    tibx = TIBX(io.BytesIO(build_lsm_archive([ExtentSpec(10, 0, b"x" * 64)])))
+    assert tibx.recovery_point is None
+
+
+def test_select_by_guid_of_a_replaced_backup() -> None:
+    # The deleted record carries the GUID of the backup that replaced it; the GUID selects that one
+    tibx = _with_records(RECORDS)
+    tibx.use_recovery_point(uuid.UUID(bytes_le=RESTARTED))
+
+    assert tibx.recovery_point.slice_id == 6
+    assert tibx.streams()[0].read(0, 7) == b"slice 6"
+
+
+def test_archive_uuid() -> None:
+    # Stored mixed-endian, like the GUIDs of the archive's backups
+    raw = bytes(range(16))
+    tibx = TIBX(io.BytesIO(build_lsm_archive([ExtentSpec(10, 0, b"x" * 64)], uuid=raw)))
+    assert tibx.uuid == uuid.UUID(bytes_le=raw)
+
+
+def test_recovery_point_statistics() -> None:
+    record = c_tibx.slice_record(
+        guid=b"\x01" * 16,
+        user_size=0x10000,
+        compr_size=0x4000,
+        items_added=3,
+        items_changed=2,
+        items_removed=1,
+        flags=c_tibx.SliceType.INCREMENTAL,
+    )
+    point = RecoveryPoint(0, 1, record)
+
+    assert point.size == 0x10000
+    assert point.compressed_size == 0x4000
+    assert (point.items_added, point.items_changed, point.items_removed) == (3, 2, 1)
+    assert point.type == "INCREMENTAL"
