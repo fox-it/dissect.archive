@@ -581,9 +581,11 @@ class ExtentSpec(NamedTuple):
     segment_group: int | None = None
 
 
-def slice_record(guid: bytes, created_ms: int, finished_ms: int, flags: int = c_tibx.SliceType.FULL) -> bytes:
+def slice_record(guid: bytes, created_ms: int, finished_ms: int, flags: int = 0x01) -> bytes:
     """One TLV[5] slices record value: a backup's GUID, its start/finish times and its type and flags."""
-    return c_tibx.slice_record(guid=guid, ctime_ms=created_ms, ftime_ms=finished_ms, flags=flags).dumps()
+    return c_tibx.slice_record(
+        guid=guid, ctime_ms=created_ms, ftime_ms=finished_ms, flags=c_tibx.SliceFlags(flags)
+    ).dumps()
 
 
 def leb128(value: int) -> bytes:

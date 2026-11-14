@@ -5,7 +5,7 @@ import uuid
 
 import pytest
 
-from dissect.archive.tibx.c_tibx import SLICE_DELETED, c_tibx
+from dissect.archive.tibx.c_tibx import c_tibx
 from dissect.archive.tibx.exception import InvalidArchiveError
 from dissect.archive.tibx.tibx import TIBX, RecoveryPoint
 from tests._tools.tibx._synth import (
@@ -36,16 +36,24 @@ def _chain() -> TIBX:
     return TIBX(io.BytesIO(archive))
 
 
+# The flags of each kind of slice seen in real archives; see SliceFlags
+FULL = 0x01
+INCREMENTAL = 0x06
+# A differential backup right after a full one, written as an incremental
+DIFFERENTIAL = 0x0A
+# A slice written as a differential, which Acronis hides
+HIDDEN = 0x0B
+
 # Records of the kinds real archives hold besides their backups, as (slice id, flags, finish
-# time in ms, GUID): a type 0xb record seconds before a differential backup, and a full backup
+# time in ms, GUID): a hidden record seconds before a differential backup, and a full backup
 # that Acronis deleted, with the GUID of the one that replaced it and has not finished
 RESTARTED = b"\x66" * 16
 RECORDS = [
-    (2, c_tibx.SliceType.FULL, 2010, b"\x02" * 16),
-    (3, 0xB, 3010, b"\x03" * 16),
-    (4, c_tibx.SliceType.DIFFERENTIAL, 4010, b"\x04" * 16),
-    (5, SLICE_DELETED | c_tibx.SliceType.FULL, 5010, RESTARTED),
-    (6, c_tibx.SliceType.FULL, 0, RESTARTED),
+    (2, FULL, 2010, b"\x02" * 16),
+    (3, HIDDEN, 3010, b"\x03" * 16),
+    (4, DIFFERENTIAL, 4010, b"\x04" * 16),
+    (5, c_tibx.SliceFlags.DELETED | FULL, 5010, RESTARTED),
+    (6, FULL, 0, RESTARTED),
 ]
 
 
@@ -197,7 +205,7 @@ def test_latest_is_the_newest_finished_backup() -> None:
 
 def test_latest_without_a_finished_backup() -> None:
     # Then "latest" leaves nothing out, not even data newer than every record
-    tibx = _with_records([(2, c_tibx.SliceType.FULL, 0, b"\x02" * 16)], slice_ids=[2, 3])
+    tibx = _with_records([(2, FULL, 0, b"\x02" * 16)], slice_ids=[2, 3])
     assert tibx.streams()[0].read(0, 7) == b"slice 3"
 
     tibx.use_recovery_point(0)
@@ -263,7 +271,7 @@ def test_selected_recovery_point_with_one_not_finished() -> None:
 
 
 def test_selected_recovery_point_without_a_finished_backup() -> None:
-    tibx = _with_records([(2, c_tibx.SliceType.FULL, 0, b"\x02" * 16)])
+    tibx = _with_records([(2, FULL, 0, b"\x02" * 16)])
     assert tibx.recovery_point is None
 
 
@@ -296,7 +304,7 @@ def test_recovery_point_statistics() -> None:
         items_added=3,
         items_changed=2,
         items_removed=1,
-        flags=c_tibx.SliceType.INCREMENTAL,
+        flags=c_tibx.SliceFlags(INCREMENTAL),
     )
     point = RecoveryPoint(0, 1, record)
 
@@ -304,3 +312,19 @@ def test_recovery_point_statistics() -> None:
     assert point.compressed_size == 0x4000
     assert (point.items_added, point.items_changed, point.items_removed) == (3, 2, 1)
     assert point.type == "INCREMENTAL"
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        (FULL, "FULL"),
+        (INCREMENTAL, "INCREMENTAL"),
+        (DIFFERENTIAL, "DIFFERENTIAL"),
+        (HIDDEN, "DIFFERENTIAL"),
+        (c_tibx.SliceFlags.DELETED | INCREMENTAL, "INCREMENTAL"),
+    ],
+)
+def test_recovery_point_type(flags: int, expected: str) -> None:
+    # The type of backup that was asked for, not the type its slice was written as
+    record = c_tibx.slice_record(guid=b"\x01" * 16, flags=c_tibx.SliceFlags(flags))
+    assert RecoveryPoint(0, 1, record).type == expected

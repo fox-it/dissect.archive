@@ -21,7 +21,7 @@ from collections import OrderedDict, defaultdict
 from itertools import compress, groupby, islice, repeat
 from operator import add, itemgetter, le, ne
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, NamedTuple
+from typing import TYPE_CHECKING, BinaryIO, Literal, NamedTuple
 
 from dissect.util.stream import AlignedStream, MappingStream
 
@@ -36,8 +36,6 @@ from dissect.archive.tibx.c_tibx import (
     MBR_SIGNATURE,
     MBR_TYPE_GPT_PROTECTIVE,
     PAGE_SIZE,
-    SLICE_DELETED,
-    SLICE_TYPE_MASK,
     TLV_IMAP,
     TLV_KEYMAP,
     TLV_META,
@@ -88,16 +86,15 @@ MIN_VOLUME_SIZE = 1 << 20
 # Partitions are imaged in whole sectors of at least this size
 SECTOR_SIZE = 512
 
-# The types of the slices that acrocmd lists as backups. The slices tree also records others,
-# such as type 0xb, which nearly always comes just before a differential backup.
-BACKUP_TYPES = (c_tibx.SliceType.FULL, c_tibx.SliceType.INCREMENTAL, c_tibx.SliceType.DIFFERENTIAL)
-
 # A GUID has 32 hex digits, however it is written; an index of that length never occurs
 GUID_HEX_DIGITS = 32
 
 # Cluster sizes a filesystem may use, from a sector to the 2 MiB NTFS allows; for telling a
 # volume's allocation bitmap by its span
 CLUSTER_SIZES = tuple(SECTOR_SIZE << shift for shift in range(13))
+
+# The type of a backup, as RecoveryPoint.type gives it
+BackupType = Literal["FULL", "INCREMENTAL", "DIFFERENTIAL"]
 
 
 class RecoveryPoint:
@@ -126,13 +123,19 @@ class RecoveryPoint:
         )
 
     @property
-    def type(self) -> str:
+    def type(self) -> BackupType:
         """The type of this backup: ``"FULL"``, ``"INCREMENTAL"`` or ``"DIFFERENTIAL"``.
 
-        A type this parser does not know comes back as ``"unknown (<value>)"``.
+        The type the backup was asked for as, which is what Acronis shows, not the one its
+        slice was written as: a differential backup right after a full one is written as an
+        incremental.
         """
-        slice_type = c_tibx.SliceType(self._record.flags & SLICE_TYPE_MASK)
-        return slice_type.name or f"unknown ({int(slice_type):#x})"
+        flags = self._record.flags
+        if flags & c_tibx.SliceFlags.INCREMENTAL:
+            return "INCREMENTAL"
+        if flags & c_tibx.SliceFlags.DIFFERENTIAL:
+            return "DIFFERENTIAL"
+        return "FULL"
 
     @property
     def created(self) -> datetime.datetime:
@@ -439,13 +442,13 @@ class TIBX:
         backups: one record per backup, keyed by slice id, carrying the same GUID that
         ``acrocmd list backups`` prints.
 
-        Not every record is a backup that Acronis lists. Records marked deleted (bit 7 of
-        their flags) are left out; one can carry the GUID of the backup that replaced it.
-        So are records of other types than a full, incremental or differential backup, such
-        as type 0xb, which nearly always comes just before a differential backup. A backup
-        that has not finished is not listed by Acronis either, but is listed here, with a
-        :attr:`~RecoveryPoint.finished` of ``None``, so that its data can be selected. In
-        every archive seen, it is the newest backup.
+        Not every record is a backup that Acronis lists. Records marked deleted are left out;
+        one can carry the GUID of the backup that replaced it. So are the slices Acronis
+        hides, those written as a differential (flags 0xb), one of which nearly always comes
+        just before a differential backup. A backup that has not finished is not listed by
+        Acronis either, but is listed here, with a :attr:`~RecoveryPoint.finished` of
+        ``None``, so that its data can be selected. In every archive seen, it is the newest
+        backup.
 
         This deliberately does not enumerate ARCH commit roots. A commit root is a
         transactional checkpoint, not a backup, and Acronis writes a varying number of
@@ -469,7 +472,9 @@ class TIBX:
                     if len(cell.key) < len(c_tibx.slice_key):
                         continue
                     record = c_tibx.slice_record(cell.value)
-                    if record.flags & SLICE_DELETED or (record.flags & SLICE_TYPE_MASK) not in BACKUP_TYPES:
+                    # As libarchive3 lists slices by default: not deleted ones, nor hidden ones
+                    hidden = record.flags & c_tibx.SliceFlags.HIDDEN == c_tibx.SliceFlags.HIDDEN
+                    if hidden or record.flags & c_tibx.SliceFlags.DELETED:
                         continue
                     records[c_tibx.slice_key(cell.key).slice_id] = record
             self._recovery_points = [

@@ -70,12 +70,21 @@ struct page_header {
     uint32      crc32c;                 /* CRC-32C of the page, checksum bytes zeroed */
 };
 
-/* The type of a backup: the low 7 bits of slice_record.flags, which Acronis's ARCH header
- * dump prints as the slice's "type" */
-enum SliceType : uint8 {
-    FULL            = 0x01,
-    INCREMENTAL     = 0x06,
-    DIFFERENTIAL    = 0x0A
+/* slice_record.flags, as libarchive3's ar_slice_from_disk() reads it.
+ *
+ * INCREMENTAL and DIFFERENTIAL are the type of backup that was asked for; a full backup has
+ * neither. The low two bits are the type the slice was written as (1 full, 2 incremental,
+ * 3 differential, as libarchive3's slice_type2str() names them), which is not always the
+ * same: a differential backup right after a full one is written as an incremental (0x0A).
+ * A slice written as a differential (0x0B), with both low bits set, is HIDDEN: Acronis does
+ * not list it unless asked to show hidden slices, and in real archives one nearly always
+ * comes just before a differential backup. libarchive3 keeps bits 0x70 with the low two,
+ * but never sets or reads them. */
+flag SliceFlags : uint8 {
+    HIDDEN          = 0x03,
+    INCREMENTAL     = 0x04,
+    DIFFERENTIAL    = 0x08,
+    DELETED         = 0x80
 };
 
 /* TLV[5] "slices" record: one backup of the archive. Every data_map extent carries this
@@ -96,7 +105,7 @@ struct slice_record {
     uint32      items_added;
     uint32      items_changed;
     uint32      items_removed;
-    uint8       flags;                  /* low 7 bits: the SliceType; bit 7: deleted */
+    SliceFlags  flags;
     uint64      last_segment_id;        /* last segment id of the backup */
     uint32      features;               /* see `slice_features2str()` */
     uint64      data_size;              /* data bytes on disk, observed; 0 in True Image 2020 */
@@ -565,9 +574,6 @@ EXTENT_INDEX_WHOLE_SEGMENT = 0xFFFF
 
 SEGMENT_MAP_KEY_SIZE = len(c_tibx.segment_map_key)
 SEGMENT_MAP_VALUE_SIZE = len(c_tibx.segment_map_value)
-
-SLICE_TYPE_MASK = 0x7F
-SLICE_DELETED = 0x80
 
 IMAP_KEY_SIZE = len(c_tibx.imap_key)
 IMAP_VALUE_SIZE = len(c_tibx.imap_value)
