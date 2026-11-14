@@ -15,13 +15,21 @@ from typing import TYPE_CHECKING
 import pytest
 
 from dissect.archive.tibx.c_tibx import c_tibx
+from dissect.archive.tibx.exception import MissingVolumeError
 from dissect.archive.tibx.map import Extent, ExtentTable, load_extents, load_segment_index
-from dissect.archive.tibx.tibx import MIN_VOLUME_SIZE, TIBX, find_split_parts, resolve_extents
+from dissect.archive.tibx.tibx import (
+    MIN_VOLUME_SIZE,
+    TIBX,
+    _missing_volumes_message,
+    find_split_parts,
+    resolve_extents,
+)
 from tests._tools.tibx._synth import (
     PAGE,
     Cell,
     CountingIO,
     ExtentSpec,
+    ImapItem,
     arch_header_page,
     build_exfat_image,
     build_fat32_image,
@@ -29,12 +37,14 @@ from tests._tools.tibx._synth import (
     build_version_set,
     data_map_key,
     data_map_value,
+    imap,
     lsb,
     lsm_page,
     segment_map_key,
     segment_map_value,
     segment_pages,
     sparse_extents,
+    volumes,
     write_split_parts,
 )
 
@@ -526,6 +536,79 @@ def test_version_set_volumes(tmp_path: Path, use_ctree: bool) -> None:
         assert result["holes"] == 7  # the compacted logical range of the base file
 
 
+@pytest.mark.parametrize(
+    ("indexes", "name"),
+    [([0, 5], "Ver-0005.tibx"), ([0, 1], "Ver-0005.tibx"), ([0, 1], "Ver-0001.tibx")],
+    ids=["by-file-number", "numbered-in-order", "no-gap"],
+)
+def test_version_set_after_cleanup(tmp_path: Path, indexes: list[int], name: str) -> None:
+    # A cleanup removed the files between the base and the version file. The table indexes
+    # them by file number, or 0, 1, ... in the order of the files: either maps them
+    data = b"version-file volume content" * 100
+    stub, version = build_version_set([ExtentSpec(10, 0, data)], indexes=indexes)
+    (tmp_path / "Ver.tibx").write_bytes(stub)
+    (tmp_path / name).write_bytes(version)
+
+    with TIBX.open(tmp_path / "Ver.tibx") as tibx:
+        assert tibx.streams()[0].read(0, len(data)) == data
+
+
+def test_version_set_missing_volumes(tmp_path: Path) -> None:
+    stub, version = build_version_set([ExtentSpec(10, 0, b"x" * 100)], indexes=[0, 9], missing=[1, 2, 3, 5])
+    (tmp_path / "Ver.tibx").write_bytes(stub)
+    (tmp_path / "Ver-0009.tibx").write_bytes(version)
+
+    with pytest.raises(MissingVolumeError, match=r"missing 4 of the 6 files of this archive: -0001 to -0003, -0005$"):
+        TIBX.open(tmp_path / "Ver.tibx")
+    # From file-like objects, which are numbered 0, 1, ...: which files are missing is unknown
+    with pytest.raises(MissingVolumeError, match=r"missing 4 of the 6 files of this archive$"):
+        TIBX([io.BytesIO(stub), io.BytesIO(version)])
+
+
+def test_missing_volumes_named_at_most() -> None:
+    # Every other file of 20 missing: ten runs of one, of which the message names the first three
+    table = {number: number * PAGE for number in range(20)}
+    found = list(range(0, 20, 2))
+
+    message = _missing_volumes_message(table, len(found), found, max_missing_filenames=3)
+    assert message == "missing 10 of the 20 files of this archive: -0001, -0003, -0005, ..."
+    assert _missing_volumes_message(table, len(found), found).endswith("-0019")
+    assert _missing_volumes_message(table, 20, list(range(20))) is None
+
+
+def test_version_file_on_its_own(tmp_path: Path) -> None:
+    # Only the version file: its table names the first file too
+    _, version = build_version_set([ExtentSpec(10, 0, b"x" * 100)])
+    (tmp_path / "Ver-0001.tibx").write_bytes(version)
+
+    with pytest.raises(MissingVolumeError, match=r"missing 1 of the 2 files of this archive: the first file$"):
+        TIBX.open(tmp_path / "Ver-0001.tibx")
+
+
+def test_split_archive_missing_part(tmp_path: Path) -> None:
+    # A raw byte-split: the parts have no table of their own, the archive as a whole has
+    archive = build_lsm_archive(
+        [ExtentSpec(10, 0, b"split archive content" * 1000)], extra_slots={18: volumes([0, 4 * PAGE, 8 * PAGE])}
+    )
+    parts = write_split_parts(archive, tmp_path, "Split", (4 * PAGE, 8 * PAGE))
+    with TIBX.open(parts[0]) as tibx:
+        assert tibx.streams()[0].read(0, 21) == b"split archive content"
+
+    parts[1].unlink()
+    with pytest.raises(MissingVolumeError, match=r"missing 1 of the 3 files of this archive: -0001$"):
+        TIBX.open(parts[0])
+
+
+def test_split_part_on_its_own(tmp_path: Path) -> None:
+    # A later part of a raw byte-split has no header of its own to read
+    archive = build_lsm_archive([ExtentSpec(10, 0, b"split archive content" * 1000)])
+    parts = write_split_parts(archive, tmp_path, "Split", (4 * PAGE,))
+    parts[0].unlink()
+
+    with pytest.raises(MissingVolumeError, match=r"missing the first file of this archive, Split\.tibx$"):
+        TIBX.open(parts[1])
+
+
 def _ntfs_boot(total_sectors: int, sector_size: int = 512) -> bytes:
     """A boot sector just complete enough for _boot_sector_size to size the volume."""
     boot = bytearray(512)
@@ -560,6 +643,123 @@ def test_metadata_streams_are_not_volumes() -> None:
 
     assert [v.volume_id for v in tibx.volumes()] == [4]
     assert len(tibx.streams()) == 4  # nothing is lost, just classified
+
+
+def _two_generations(*items: ImapItem, meta: bytes | None = None) -> TIBX:
+    # A full backup (slice 2) and a second one (slice 3) that writes the partition to a new
+    # stream, 8, which shares the first one's unchanged boot sector. The first full's
+    # stream, 4, stays in the archive
+    boot = _ntfs_boot(0x18000)
+    extra_slots = {0: imap(list(items))}
+    if meta is not None:
+        extra_slots[9] = meta
+    archive = build_lsm_archive(
+        [
+            ExtentSpec(4, 0, boot, slice_id=2),
+            ExtentSpec(4, 0x10000, b"first".ljust(512, b"\x00"), slice_id=2),
+            ExtentSpec(8, 0, boot, slice_id=2),
+            ExtentSpec(8, 0x10000, b"second".ljust(512, b"\x00"), slice_id=3),
+            ExtentSpec(9, 0, b'\xef\xbb\xbf<?xml version="1.0"?><metainfo/>', slice_id=3),
+        ],
+        slices=[2, 3],
+        extra_slots=extra_slots,
+    )
+    return TIBX(io.BytesIO(archive))
+
+
+def test_volumes_are_the_partitions_the_imap_names() -> None:
+    tibx = _two_generations(
+        ImapItem(2, b"disk1/part1", 4, 0x3000000),
+        ImapItem(2, b"part/77494f13728b0e116d08d747fe6df179", 4, 0x3000000),
+        ImapItem(3, b"disk1/part1", 8, 0x3000000),
+        ImapItem(3, b"part/77494f13728b0e116d08d747fe6df179", 8, 0x3000000),
+        ImapItem(3, b"meta", 9, 49),
+    )
+    # Both generations of the partition look like one
+    assert {stream.volume_id for stream in tibx.streams()} == {4, 8, 9}
+
+    assert [volume.volume_id for volume in tibx.volumes()] == [8]
+    assert tibx.volumes()[0].read(0x10000, 6) == b"second"
+    # At the first backup, the second stream holds the boot sector it shares: not a volume
+    tibx.use_recovery_point(0)
+    assert [volume.volume_id for volume in tibx.volumes()] == [4]
+    assert tibx.volumes()[0].read(0x10000, 5) == b"first"
+
+
+def test_volumes_without_the_deleted_partitions() -> None:
+    # The second backup no longer has the partition
+    tibx = _two_generations(
+        ImapItem(2, b"disk1/part1", 4, 0x3000000),
+        ImapItem(3, b"disk1/part1", 0, 0, flags=c_tibx.ItemFlags.COMPLETE | c_tibx.ItemFlags.DELETED),
+        ImapItem(3, b"disk1/part2", 8, 0x3000000),
+    )
+    assert [volume.volume_id for volume in tibx.volumes()] == [8]
+    tibx.use_recovery_point(0)
+    assert [volume.volume_id for volume in tibx.volumes()] == [4]
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        pytest.param([ImapItem(3, b"meta", 9, 49)], id="acronis-items-only"),
+        # A backup that never finished: its disk is complete, its partition's link is not
+        pytest.param(
+            [
+                ImapItem(3, b"disk1", 9, 49, flags=c_tibx.ItemFlags.COMPLETE),
+                ImapItem(3, b"part/77494f13728b0e116d08d747fe6df179", 8, 0x3000000, flags=c_tibx.ItemFlags(0)),
+            ],
+            id="not-finished",
+        ),
+    ],
+)
+def test_volumes_without_partitions_in_the_imap(items: list[ImapItem]) -> None:
+    # No partition in the imap: the streams are judged by their content
+    tibx = _two_generations(*items)
+    assert [volume.volume_id for volume in tibx.volumes()] == [8, 4]
+
+
+@pytest.mark.parametrize(
+    ("meta", "archive_type"),
+    [
+        (b"disk\x00{guid}\x0026.10.1.43456\x00", "disk"),
+        (b"file\x00{guid}\x0026.10.1.43456\x00", "file"),
+        (b"", ""),
+    ],
+)
+def test_archive_type(meta: bytes, archive_type: str) -> None:
+    assert _two_generations(meta=meta).archive_type == archive_type
+
+
+@pytest.mark.parametrize(
+    ("payload", "meta"),
+    [
+        (b"", {}),
+        # Bytes after the last NUL are no slot, as Acronis reads them
+        (b"disk", {}),
+        (b"disk\x00\x00x", {c_tibx.MetaKey.TYPE: "disk", c_tibx.MetaKey.DISPLAY_NAME: ""}),
+        (b"file\x00Pl\xc3\xa4n\x00", {c_tibx.MetaKey.TYPE: "file", c_tibx.MetaKey.DISPLAY_NAME: "Pl\u00e4n"}),
+        # No slot past the last key
+        (b"\x00" * 25, dict.fromkeys(c_tibx.MetaKey, "")),
+    ],
+)
+def test_meta(payload: bytes, meta: dict[c_tibx.MetaKey, str]) -> None:
+    assert _two_generations(meta=payload).meta == meta
+
+
+def test_file_level_backup_has_no_volumes() -> None:
+    # A large file looks like a partition by its content, as two real file-level backups
+    # listing 240 and 107 volumes showed
+    tibx = _two_generations(
+        ImapItem(2, b"C:/Users/user/disk.vhd", 4, 0x3000000),
+        ImapItem(3, b"C:/Users/user/disk.vhd", 8, 0x3000000),
+        ImapItem(3, b"C:/Users/user/notes.xml", 9, 49),
+        meta=b"file\x00",
+    )
+    assert tibx.archive_type == "file"
+    assert tibx.volumes() == []
+    assert len(tibx.streams()) == 3  # nothing is lost
+    tibx.use_recovery_point(0)
+    assert tibx.volumes() == []
 
 
 def test_unformatted_partition_is_still_a_volume() -> None:

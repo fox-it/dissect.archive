@@ -18,7 +18,7 @@ import uuid
 from array import array
 from bisect import bisect_right
 from collections import OrderedDict, defaultdict
-from itertools import compress, islice, repeat
+from itertools import compress, groupby, islice, repeat
 from operator import add, itemgetter, le, ne
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, NamedTuple
@@ -39,6 +39,7 @@ from dissect.archive.tibx.c_tibx import (
     SLICE_TYPE_MASK,
     TLV_IMAP,
     TLV_KEYMAP,
+    TLV_META,
     TLV_SLICES,
     TLV_VOLUMES,
     c_boot,
@@ -49,6 +50,7 @@ from dissect.archive.tibx.exception import (
     Error,
     InvalidArchiveError,
     InvalidPasswordError,
+    MissingVolumeError,
     UnsupportedFormatError,
 )
 from dissect.archive.tibx.lsm import iter_tree_cells, read_archive_header
@@ -60,6 +62,7 @@ from dissect.archive.tibx.stream import TibxVolumeStream
 if TYPE_CHECKING:
     from typing_extensions import Self
 
+    from dissect.archive.tibx.lsm import ArchiveHeader
     from dissect.archive.tibx.map import Extent, ExtentTable
 
 # Decompressed segments are cached per archive under a memory budget rather than a fixed
@@ -155,16 +158,24 @@ class TIBX:
     Args:
         fh: A file-like object of the archive, or the ordered file-like objects of a
             split archive's parts (a raw byte-split of one logical page store).
+
+    Raises:
+        ~dissect.archive.tibx.exception.MissingVolumeError: If the archive names more volumes
+            (files) than ``fh`` gives.
     """
 
     def __init__(self, fh: BinaryIO | list[BinaryIO]):
         self._handles: list[BinaryIO] = []
+        files = None
         if isinstance(fh, list):
+            files = len(fh)
             fh = _stitch(fh)
         self.fh = fh
         self.store = PageStore(fh)
         self.root = self.store.live_root()
         self.header = read_archive_header(self.store, self.root)
+        if files is not None:
+            self._check_files(files)
 
         self._recovery_points: list[RecoveryPoint] | None = None
         self._slice_limit: int | None = None
@@ -203,8 +214,13 @@ class TIBX:
 
         The returned instance owns the file handles; call :meth:`close` (or use it as a
         context manager) to release them.
+
+        Raises:
+            ~dissect.archive.tibx.exception.MissingVolumeError: If volumes (files) of the archive are
+                missing.
         """
         parts = find_split_parts(Path(path))
+        numbers = _part_numbers(parts)
         handles = []
         try:
             # Open one by one so a failure mid-list doesn't leak already-opened handles
@@ -214,13 +230,33 @@ class TIBX:
                 # that is no multiple of it into two reads. A split set goes through a
                 # MappingStream, which expects whole reads from its parts.
                 handles.append(part.open("rb", buffering=0 if len(parts) == 1 else -1))  # noqa: PERF401
-            tibx = cls(handles if len(handles) > 1 else handles[0])
+            try:
+                tibx = cls(_stitch(handles, numbers) if len(handles) > 1 else handles[0])
+            except Error as e:
+                if numbers[0]:
+                    # A later file on its own, which need not even start with a header
+                    first = SPLIT_PART_RE.match(parts[0].name).group("stem") + parts[0].suffix
+                    raise MissingVolumeError(f"missing the first file of this archive, {first}") from e
+                raise
+            tibx._check_files(len(handles), numbers)
         except Exception:
             for handle in handles:
                 handle.close()
             raise
         tibx._handles = handles
         return tibx
+
+    def _check_files(self, found: int, numbers: list[int] | None = None) -> None:
+        """Check that the ``found`` files, numbered ``numbers`` if known, are all the files of the archive.
+
+        The table of the archive as a whole is checked here, after the files were mapped by
+        the table in the last one, if it had one: a raw byte-split part has none.
+
+        Raises:
+            ~dissect.archive.tibx.exception.MissingVolumeError: If they are not.
+        """
+        if (missing := _missing_volumes_message(_volume_table(self.header), found, numbers)) is not None:
+            raise MissingVolumeError(missing)
 
     def close(self) -> None:
         """Close the file handles owned by this instance (opened via :meth:`open`).
@@ -283,6 +319,32 @@ class TIBX:
         from dissect.archive.tibx.crypto import has_certificate_wrapped_key
 
         return has_certificate_wrapped_key(self.header)
+
+    @property
+    def meta(self) -> dict[c_tibx.MetaKey, str]:
+        """The archive's meta (TLV[9]): the archive type, the product that wrote it, its machine, owner and plan.
+
+        TLV[9] holds a NUL-terminated string per slot, in the order of :class:`MetaKey`,
+        as libarchive3's ``ar_meta_keys`` names them. An older product writes fewer slots,
+        which are left out: Cyber Protect 15 writes no ``PASSWORD_HINT``, True Image 2020
+        no ``CENTRALIZED_PLAN_ID`` either. Bytes after the last NUL are ignored, as Acronis
+        ignores them. The meta is stored unencrypted, so it can be read without a password,
+        even from an encrypted archive.
+        """
+        # The last piece is what follows the last NUL. Fewer values than keys is an older
+        # writer, more ones are no slot libarchive3 knows
+        *values, _ = self.header.tlv[TLV_META].payload.split(b"\x00")
+        return {key: value.decode("utf-8", "replace") for key, value in zip(c_tibx.MetaKey, values, strict=False)}
+
+    @property
+    def archive_type(self) -> str:
+        """What the archive holds: ``"disk"`` for a disk-level backup, ``"file"`` for a file-level one.
+
+        The ``TYPE`` of the :attr:`meta`, which Acronis reads as the archive type:
+        libarchive3 creates no backup in an archive without one, and ``tibxread`` opens only
+        a ``"disk"`` archive. An empty string if the archive has no type.
+        """
+        return self.meta.get(c_tibx.MetaKey.TYPE, "")
 
     def unlock(self, password: str | bytes) -> None:
         """Derive the data key from ``password`` to read encrypted segments.
@@ -412,38 +474,71 @@ class TIBX:
         if self._streams is None:
             extents = self.extents
             streams = [TibxVolume(self, vid, extents, start, stop) for vid, start, stop in extents.volume_ranges()]
-            streams.sort(key=lambda stream: (stream._newest_slice, stream.span), reverse=True)
+            streams.sort(key=_stream_order, reverse=True)
             self._streams = streams
         return self._streams
 
     def volumes(self) -> list[TibxVolume]:
-        """The backed-up volumes, newest backup generation first, then largest first.
+        """The backed-up volumes of the selected recovery point, newest backup generation first, then largest first.
 
-        An archive's data_map holds more streams than it holds volumes: alongside each
+        An archive's data_map holds more streams than it holds volumes. Alongside each
         partition, Acronis stores its own metadata -- the ``metainfo`` XML, allocation
         bitmaps, small index tables -- and the disk's MBR/GPT bootstrap region, all keyed
-        by volume id exactly like a partition. Returning those as volumes made a
-        single-partition backup look like eight, and a file-level backup like forty-five.
+        by volume id exactly like a partition. And every full or differential backup writes
+        its partitions to new streams, while those of the backups before it stay: a chain of
+        ten full backups of three partitions holds thirty streams that look like partitions.
 
-        A stream counts as a volume if its content starts with a filesystem this parser
+        So the volumes are the streams the imap names for the partitions of the selected
+        backup, ``disk%u/part%u``. A partition that stores no data at all, such as one never
+        formatted, has no data_map stream. It is listed last and reads as zeros, as
+        Acronis's ``tibxread`` reads it.
+
+        A file-level backup, of :attr:`archive_type` ``"file"``, has no volumes: its files
+        are streams too, and large ones look like partitions.
+
+        Without partitions in the imap otherwise -- it is encrypted and the archive locked,
+        or the backup never finished, so that none of its partitions was completed -- a
+        stream counts as a volume if its content starts with a filesystem this parser
         recognises, or if it is at least :data:`MIN_VOLUME_SIZE`, a whole number of sectors
         and does not start with a partition table -- which keeps an unformatted or
-        unrecognised partition, something ``acrocmd list content`` reports as a partition
-        of type ``None``. Use :meth:`streams` for the unfiltered list.
-
-        A partition that stores no data at all, such as one never formatted, has no data_map
-        stream. It is listed last, from the imap, and reads as zeros, as Acronis's
-        ``tibxread`` reads it. If the imap is encrypted, a locked archive does not list it.
+        unrecognised partition, something ``acrocmd list content`` reports as a partition of
+        type ``None``. Use :meth:`streams` for the unfiltered list.
         """
         if self._volumes is None:
-            streams = self.streams()
-            bitmap_spans = _bitmap_spans(streams)
-            self._volumes = [stream for stream in streams if self._is_volume(stream, bitmap_spans)]
-            self._volumes.extend(self._empty_partitions())
+            if self.archive_type == "file":
+                volumes = []
+            elif partitions := self._partitions():
+                named = {partition.id for partition in partitions}
+                if self._streams is not None:
+                    volumes = [stream for stream in self._streams if stream.volume_id in named]
+                else:
+                    # Only the streams of the partitions: resolving every stream's extents
+                    # costs seconds per backup on a large archive
+                    extents = self.extents
+                    volumes = [
+                        TibxVolume(self, vid, extents, start, stop)
+                        for vid, start, stop in extents.volume_ranges()
+                        if vid in named
+                    ]
+                    volumes.sort(key=_stream_order, reverse=True)
+                stored = {volume.volume_id for volume in volumes}
+                volumes.extend(
+                    TibxVolume(self, partition.id, self.extents, 0, 0)
+                    for partition in partitions
+                    if partition.id not in stored
+                )
+            else:
+                streams = self.streams()
+                bitmap_spans = _bitmap_spans(streams)
+                volumes = [stream for stream in streams if self._is_volume(stream, bitmap_spans)]
+            self._volumes = volumes
         return self._volumes
 
-    def _empty_partitions(self) -> list[TibxVolume]:
-        """The partitions of the selected recovery point whose content has no data_map stream."""
+    def _partitions(self) -> list[ItemStream]:
+        """The partitions of the selected recovery point, as the imap names them, by the record of their data stream.
+
+        Empty if the imap names no partition, or if it is encrypted and the archive locked.
+        """
         try:
             records = self._item_streams()
         except InvalidPasswordError:
@@ -452,18 +547,18 @@ class TIBX:
         # lists items; one that is deleted or incomplete is not there
         versions: dict[bytes, ItemStream] = {}
         for record in records:
-            if record.index == 0 and (self._slice_limit is None or record.slice_id <= self._slice_limit):
+            if (
+                record.index == 0
+                and (self._slice_limit is None or record.slice_id <= self._slice_limit)
+                and PARTITION_NAME_RE.fullmatch(record.name)
+            ):
                 version = versions.get(record.name)
                 if version is None or record.slice_id > version.slice_id:
                     versions[record.name] = record
-        streams = {stream.volume_id for stream in self.streams()}
         return [
-            TibxVolume(self, record.id, self.extents, 0, 0)
-            for name, record in versions.items()
-            if PARTITION_NAME_RE.fullmatch(name)
-            and record.flags & c_tibx.ItemFlags.COMPLETE
-            and not record.flags & c_tibx.ItemFlags.DELETED
-            and record.id not in streams
+            record
+            for record in versions.values()
+            if record.flags & c_tibx.ItemFlags.COMPLETE and not record.flags & c_tibx.ItemFlags.DELETED
         ]
 
     def _item_streams(self) -> list[ItemStream]:
@@ -821,38 +916,109 @@ class _ZeroStream(AlignedStream):
         return b"\x00" * length
 
 
-def _volume_offsets(handle: BinaryIO, expected: int) -> list[int] | None:
-    """The logical byte offset of every file of an archive set, from the volumes in ``handle``'s TLV[18].
+def _part_numbers(parts: list[Path]) -> list[int]:
+    """The number of each file of an archive, as :func:`find_split_parts` returns them: 0 for the first file."""
+    if len(parts) == 1:
+        # A file named -NNNN on its own: the first file is missing
+        match = SPLIT_PART_RE.match(parts[0].name)
+        return [int(match.group("num")) if match else 0]
+    return [0, *(int(SPLIT_PART_RE.match(part.name).group("num")) for part in parts[1:])]
+
+
+def _volume_table(header: ArchiveHeader) -> dict[int, int]:
+    """The volumes of the archive that ``header``'s TLV[18] names: where each starts in the archive, by index.
 
     Acronis calls the files of an archive its volumes; they have nothing to do with the
-    backed-up volumes of :meth:`TIBX.volumes`.
-
-    Version files carry the archive's newest commit roots, so the *last* file's live
-    root has the authoritative volumes. Returns None when the file carries no
-    plausible table for ``expected`` files -- notably for raw byte-split parts, which
-    are page-misaligned fragments without their own roots.
+    backed-up volumes of :meth:`TIBX.volumes`. TLV[18] is a run of ``ar_volume`` entries,
+    and empty if the header has none.
     """
-    entry_size = len(c_tibx.ar_volume)
+    payload = header.tlv[TLV_VOLUMES].payload
+    count = len(payload) // len(c_tibx.ar_volume)
+    entries = c_tibx.ar_volume[count](payload)
+    return {entry.index: entry.start_offs for entry in entries}
+
+
+def _own_volume_table(handle: BinaryIO) -> dict[int, int] | None:
+    """The volume table of the newest commit in the file ``handle`` itself.
+
+    Version files carry the archive's newest commit roots, so the *last* file's live root
+    has the authoritative table. None if the file has no commit root of its own, as a raw
+    byte-split part, a page-misaligned fragment, has not.
+    """
     try:
         store = PageStore(handle)
-        header = read_archive_header(store, store.live_root())
+        return _volume_table(read_archive_header(store, store.live_root()))
     except Error:
         return None
-    payload = header.tlv[TLV_VOLUMES].payload if len(header.tlv) > TLV_VOLUMES else b""
-    if len(payload) // entry_size != expected:
+
+
+def _missing_volumes_message(
+    table: dict[int, int], found: int, numbers: list[int] | None = None, max_missing_filenames: int = 10
+) -> str | None:
+    """The error message naming which of the volumes ``table`` names are missing; None if none are.
+
+    The message speaks of files, as Acronis's own does: those are what a user looks for.
+
+    Args:
+        table: The archive's volume table, from :func:`_volume_table`.
+        found: How many files of the archive there are.
+        numbers: Their numbers, if known: 0 for the first file, NNNN for the one named -NNNN.
+        max_missing_filenames: How many missing files, or runs of them, the message names
+            before it leaves the rest out.
+
+    A table of no more volumes than files were found names no missing file: any volume it
+    does not name is left over.
+    """
+    if len(table) <= found:
         return None
-    offsets = []
-    for index in range(expected):
-        entry = c_tibx.ar_volume(payload[index * entry_size :])
-        if entry.index != index:
-            return None
-        offsets.append(entry.start_offs)
+    if numbers is None or not set(numbers) <= table.keys():
+        # Which ones are missing is unknown, or the table does not index the files by number
+        return f"missing {len(table) - found} of the {len(table)} files of this archive"
+    missing = sorted(table.keys() - set(numbers))
+    names = []
+    if missing[0] == 0:
+        names.append("the first file")
+    # Runs of consecutive numbers as one range
+    for _, run in groupby(enumerate(number for number in missing if number), lambda item: item[1] - item[0]):
+        run_numbers = [number for _, number in run]
+        first, last = run_numbers[0], run_numbers[-1]
+        names.append(f"-{first:04d}" if first == last else f"-{first:04d} to -{last:04d}")
+    if len(names) > max_missing_filenames:
+        names[max_missing_filenames:] = ["..."]
+    return f"missing {len(missing)} of the {len(table)} files of this archive: {', '.join(names)}"
+
+
+def _volume_offsets(table: dict[int, int], sizes: list[int], numbers: list[int] | None = None) -> list[int] | None:
+    """Where each file of an archive starts in it, by ``table``; None if the table cannot say.
+
+    Args:
+        table: The archive's volume table, from :func:`_volume_table`.
+        sizes: The size of each file, the first file first.
+        numbers: The number of each file, if known: 0 for the first, NNNN for the one named -NNNN.
+
+    An index in the table is the number of a file. A cleanup removes files from between the
+    others, and the table still indexes the rest by their number, in every real archive seen.
+    A table that does not index them by number but names as many files as there are is taken
+    in the order of the files, as it was before.
+    """
+    if numbers is not None and table.keys() == set(numbers):
+        offsets = [table[number] for number in numbers]
+    elif len(table) == len(sizes):
+        offsets = [table[index] for index in sorted(table)]
+    else:
+        return None
     if offsets[0] != 0 or offsets != sorted(set(offsets)):
         return None
+    # A trustworthy table never maps a file below the previous file's end
+    position = 0
+    for offset, size in zip(offsets, sizes, strict=True):
+        if offset < position:
+            return None
+        position = offset + size
     return offsets
 
 
-def _stitch(handles: list[BinaryIO]) -> MappingStream:
+def _stitch(handles: list[BinaryIO], numbers: list[int] | None = None) -> MappingStream:
     """Map the files of a multi-file archive into one logical page store.
 
     Split archives are raw byte-splits of one page store: the parts concatenate.
@@ -862,21 +1028,26 @@ def _stitch(handles: list[BinaryIO]) -> MappingStream:
     truncated, its data pages tombstoned -- while retaining its logical address
     range, so concatenation would misplace every absolute offset in the maps.
     Compacted ranges are mapped as zeros; nothing alive references them.
+
+    Args:
+        handles: The files, the first file first.
+        numbers: The number of each file, if known: 0 for the first, NNNN for the one
+            named -NNNN.
+
+    Raises:
+        ~dissect.archive.tibx.exception.MissingVolumeError: If the last file's table names
+            volumes that are not among ``handles``.
     """
     sizes = []
     for handle in handles:
         handle.seek(0, 2)
         sizes.append(handle.tell())
 
-    offsets = _volume_offsets(handles[-1], expected=len(handles)) if len(handles) > 1 else None
-    if offsets is not None:
-        # A trustworthy table never maps a file below the previous file's end
-        position = 0
-        for offset, size in zip(offsets, sizes, strict=False):
-            if offset < position:
-                offsets = None
-                break
-            position = offset + size
+    offsets = None
+    if len(handles) > 1 and (table := _own_volume_table(handles[-1])) is not None:
+        if (missing := _missing_volumes_message(table, len(handles), numbers)) is not None:
+            raise MissingVolumeError(missing)
+        offsets = _volume_offsets(table, sizes, numbers)
     if offsets is None:
         offsets = []
         position = 0
@@ -892,6 +1063,11 @@ def _stitch(handles: list[BinaryIO]) -> MappingStream:
         stream.add(offset, size, handle, 0)
         position = offset + size
     return stream
+
+
+def _stream_order(stream: TibxVolume) -> tuple[int, int]:
+    """Sort key of :meth:`TIBX.streams`, which sorts in reverse: the newest backup that wrote to a stream, its span."""
+    return stream._newest_slice, stream.span
 
 
 def _bitmap_spans(streams: list[TibxVolume]) -> set[int]:

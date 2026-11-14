@@ -586,6 +586,55 @@ def slice_record(guid: bytes, created_ms: int, finished_ms: int) -> bytes:
     return c_tibx.slice_record(guid=guid, ctime_ms=created_ms, ftime_ms=finished_ms).dumps()
 
 
+def leb128(value: int) -> bytes:
+    out = bytearray()
+    while value >= 0x80:
+        out.append(value & 0x7F | 0x80)
+        value >>= 7
+    out.append(value)
+    return bytes(out)
+
+
+def variable_cells(cells: list[Cell]) -> bytes:
+    """Encode cells as the compact cell stream of a tree with variable-length keys.
+
+    Each cell is led by its leb128 key and value lengths, a tombstone's with a value length
+    of 0 and no value.
+    """
+    out = bytearray()
+    for group_start in range(0, len(cells), LSM_CELL_GROUP_MAX):
+        group = cells[group_start : group_start + LSM_CELL_GROUP_MAX]
+        alive = sum(1 << index for index, cell in enumerate(group) if cell.alive)
+        out += c_tibx.lsm_cell_group_header(count=len(group), alive=alive).dumps()
+        for cell in group:
+            value = cell.value if cell.alive else b""
+            out += leb128(len(cell.key)) + leb128(len(value)) + cell.key + value
+    return bytes(out)
+
+
+class ImapItem(NamedTuple):
+    """One version of an item for :func:`imap`: as of backup ``slice_id``, its content is stream ``stream_id``."""
+
+    slice_id: int
+    name: bytes
+    stream_id: int
+    size: int
+    flags: int = c_tibx.ItemFlags.COMPLETE | c_tibx.ItemFlags.LINKED
+
+
+def imap(items: list[ImapItem]) -> bytes:
+    """The TLV[0] imap of ``items``, in its mem-tree."""
+    cells = [
+        Cell(
+            c_tibx.imap_key(slice_id=item.slice_id, flags=item.flags, type=0).dumps() + item.name,
+            c_tibx.imap_value(extra_streams=0).dumps()
+            + c_tibx.imap_stream(index=0, flags=c_tibx.StreamFlags.WRITTEN, id=item.stream_id, size=item.size).dumps(),
+        )
+        for item in items
+    ]
+    return lsb(0, 0, memtree_cells=cells, memtree_blob=variable_cells(cells))
+
+
 def build_lsm_archive(
     extents: list[ExtentSpec],
     *,
@@ -652,13 +701,20 @@ def build_lsm_archive(
     return header + b"".join(pages) + arci_page(page_base * PAGE, uuid, commit_seq=1, prev_ci_offset=FIRST_CI_OFFSET)
 
 
-def volumes(offsets: list[int]) -> bytes:
-    """Encode the TLV[18] volumes: the logical byte offset of each archive file."""
-    return b"".join(c_tibx.ar_volume(index=index, start_offs=offset).dumps() for index, offset in enumerate(offsets))
+def volumes(offsets: list[int], indexes: list[int] | None = None) -> bytes:
+    """Encode the TLV[18] volumes: the logical byte offset of each archive file, indexed 0, 1, ... by default."""
+    indexes = range(len(offsets)) if indexes is None else indexes
+    return b"".join(
+        c_tibx.ar_volume(index=index, start_offs=offset).dumps() for index, offset in zip(indexes, offsets, strict=True)
+    )
 
 
 def build_version_set(
-    extents: list[ExtentSpec], stub_logical_pages: int = 8, use_ctree: bool = False
+    extents: list[ExtentSpec],
+    stub_logical_pages: int = 8,
+    use_ctree: bool = False,
+    indexes: list[int] | None = None,
+    missing: list[int] | None = None,
 ) -> tuple[bytes, bytes]:
     """Build a two-file version set: a compacted base stub + one version file.
 
@@ -666,8 +722,16 @@ def build_version_set(
     empty initial root but logically spans ``stub_logical_pages`` (the removed pages of
     the deleted old version), and the version file, mapped at that logical offset by
     the TLV[18] volumes, carries the live backup with global absolute offsets.
+
+    ``indexes`` are the indexes the table gives the two files, 0 and 1 by default. The
+    table also names the files numbered ``missing``, which the set does not have.
     """
-    table = volumes([0, stub_logical_pages * PAGE])
+    indexes = [0, 1] if indexes is None else indexes
+    offsets = [0, stub_logical_pages * PAGE]
+    for number in missing or []:
+        indexes = [*indexes, number]
+        offsets = [*offsets, (stub_logical_pages + 1024 * number) * PAGE]
+    table = volumes(offsets, indexes)
     stub = arch_header_page({1: lsb(31, 10), 2: lsb(8, 32), 18: table}, modified_ms=1, uuid=b"\xaa" * 16)
     version = build_lsm_archive(extents, use_ctree=use_ctree, page_base=stub_logical_pages, extra_slots={18: table})
     return stub, version
