@@ -249,25 +249,25 @@ def test_selected_recovery_point() -> None:
     points = tibx.recovery_points()
 
     # "latest" reflects the newest backup that has finished
-    assert tibx.recovery_point is points[-1]
+    assert tibx.recovery_point == points[-1]
 
     tibx.use_recovery_point(0)
-    assert tibx.recovery_point is points[0]
+    assert tibx.recovery_point == points[0]
 
     tibx.use_recovery_point("oldest")
-    assert tibx.recovery_point is points[0]
+    assert tibx.recovery_point == points[0]
 
     tibx.use_recovery_point("latest")
-    assert tibx.recovery_point is points[-1]
+    assert tibx.recovery_point == points[-1]
 
 
 def test_selected_recovery_point_with_one_not_finished() -> None:
     tibx = _with_records(RECORDS)
     points = tibx.recovery_points()
-    assert tibx.recovery_point is points[1]
+    assert tibx.recovery_point == points[1]
 
     tibx.use_recovery_point(2)
-    assert tibx.recovery_point is points[2]
+    assert tibx.recovery_point == points[2]
 
 
 def test_selected_recovery_point_without_a_finished_backup() -> None:
@@ -328,3 +328,57 @@ def test_recovery_point_type(flags: int, expected: str) -> None:
     # The type of backup that was asked for, not the type its slice was written as
     record = c_tibx.slice_record(guid=b"\x01" * 16, flags=c_tibx.SliceFlags(flags))
     assert RecoveryPoint(0, 1, record).type == expected
+
+
+@pytest.mark.parametrize(
+    ("show_hidden", "show_deleted", "slice_ids"),
+    [
+        (False, False, [2, 4, 6]),
+        (True, False, [2, 3, 4, 6]),
+        (False, True, [2, 4, 5, 6]),
+        (True, True, [2, 3, 4, 5, 6]),
+    ],
+)
+def test_recovery_points_show_hidden_and_deleted(show_hidden: bool, show_deleted: bool, slice_ids: list[int]) -> None:
+    # As libarchive3 can be asked to, list the slices Acronis hides and the deleted backups
+    tibx = _with_records(RECORDS)
+    points = tibx.recovery_points(show_hidden=show_hidden, show_deleted=show_deleted)
+
+    assert [point.slice_id for point in points] == slice_ids
+    assert [point.index for point in points] == list(range(len(slice_ids)))
+    assert [point.hidden for point in points] == [slice_id == 3 for slice_id in slice_ids]
+    assert [point.deleted for point in points] == [slice_id == 5 for slice_id in slice_ids]
+
+
+def test_use_hidden_recovery_point() -> None:
+    # A hidden slice is selected by its RecoveryPoint; indexes and "latest" keep to the
+    # backups Acronis lists
+    tibx = _with_records(RECORDS)
+    hidden = next(point for point in tibx.recovery_points(show_hidden=True) if point.hidden)
+
+    tibx.use_recovery_point(hidden)
+    assert tibx.recovery_point == hidden
+    assert tibx.streams()[0].read(0, 7) == b"slice 3"
+
+    tibx.use_recovery_point(1)
+    assert tibx.recovery_point.slice_id == 4
+
+    tibx.use_recovery_point("latest")
+    assert tibx.recovery_point.slice_id == 4
+
+
+def test_recovery_point_equality() -> None:
+    # The same backup is equal across lists, whatever its index; a deleted backup is not the
+    # one that replaced it, though it carries its GUID
+    tibx = _with_records(RECORDS)
+    listed = tibx.recovery_points()
+    everything = tibx.recovery_points(show_hidden=True, show_deleted=True)
+
+    assert listed[1] == everything[2]
+    assert (listed[1].index, everything[2].index) == (1, 2)
+    assert set(listed) < set(everything)
+
+    deleted, replacement = everything[3], everything[4]
+    assert deleted.guid == replacement.guid
+    assert deleted != replacement
+    assert len({deleted, replacement}) == 2
