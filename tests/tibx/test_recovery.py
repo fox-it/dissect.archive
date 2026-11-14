@@ -5,9 +5,9 @@ import uuid
 
 import pytest
 
-from dissect.archive.tibx.c_tibx import c_tibx
+from dissect.archive.tibx.c_tibx import SLICE_DELETED, c_tibx
 from dissect.archive.tibx.exception import InvalidArchiveError
-from dissect.archive.tibx.tibx import TIBX
+from dissect.archive.tibx.tibx import TIBX, RecoveryPoint
 from tests._tools.tibx._synth import (
     PAGE,
     Cell,
@@ -34,6 +34,34 @@ def _chain() -> TIBX:
         slices=SLICES,
     )
     return TIBX(io.BytesIO(archive))
+
+
+# Records of the kinds real archives hold besides their backups, as (slice id, flags, finish
+# time in ms, GUID): a type 0xb record seconds before a differential backup, and a full backup
+# that Acronis deleted, with the GUID of the one that replaced it and has not finished
+RESTARTED = b"\x66" * 16
+RECORDS = [
+    (2, c_tibx.SliceType.FULL, 2010, b"\x02" * 16),
+    (3, 0xB, 3010, b"\x03" * 16),
+    (4, c_tibx.SliceType.DIFFERENTIAL, 4010, b"\x04" * 16),
+    (5, SLICE_DELETED | c_tibx.SliceType.FULL, 5010, RESTARTED),
+    (6, c_tibx.SliceType.FULL, 0, RESTARTED),
+]
+
+
+def _with_records(records: list[tuple[int, int, int, bytes]], slice_ids: list[int] | None = None) -> TIBX:
+    """An archive of ``records``, whose slices each write ``slice <id>`` at the start of a stream."""
+    if slice_ids is None:
+        slice_ids = [slice_id for slice_id, *_ in records]
+    extents = [
+        ExtentSpec(10, 0, f"slice {slice_id}".encode().ljust(64, b"\x00"), slice_id=slice_id) for slice_id in slice_ids
+    ]
+    cells = [
+        Cell(c_tibx.slice_key(slice_id=slice_id).dumps(), slice_record(guid, 1000 * slice_id, finished, flags))
+        for slice_id, flags, finished, guid in records
+    ]
+    slices = lsb(4, len(c_tibx.slice_record), memtree_cells=cells)
+    return TIBX(io.BytesIO(build_lsm_archive(extents, extra_slots={5: slices})))
 
 
 def test_slice_record_size() -> None:
@@ -143,3 +171,136 @@ def test_recovery_points_from_memtree_and_ctrees() -> None:
 
     tibx.use_recovery_point(2)
     assert tibx.extents
+
+
+def test_recovery_points_are_the_backups_acronis_lists() -> None:
+    # Acronis lists neither the deleted record nor the type 0xb one. Nor does it list a
+    # backup that has not finished, but that one is listed here for its data to be selected.
+    points = _with_records(RECORDS).recovery_points()
+
+    assert [point.slice_id for point in points] == [2, 4, 6]
+    assert [point.index for point in points] == [0, 1, 2]
+    assert [point.type for point in points] == ["FULL", "DIFFERENTIAL", "FULL"]
+    assert [point.finished is None for point in points] == [False, False, True]
+
+
+def test_latest_is_the_newest_finished_backup() -> None:
+    tibx = _with_records(RECORDS)
+    assert tibx.streams()[0].read(0, 7) == b"slice 4"
+
+    tibx.use_recovery_point(2)
+    assert tibx.streams()[0].read(0, 7) == b"slice 6"
+
+    tibx.use_recovery_point("latest")
+    assert tibx.streams()[0].read(0, 7) == b"slice 4"
+
+
+def test_latest_without_a_finished_backup() -> None:
+    # Then "latest" leaves nothing out, not even data newer than every record
+    tibx = _with_records([(2, c_tibx.SliceType.FULL, 0, b"\x02" * 16)], slice_ids=[2, 3])
+    assert tibx.streams()[0].read(0, 7) == b"slice 3"
+
+    tibx.use_recovery_point(0)
+    assert tibx.streams()[0].read(0, 7) == b"slice 2"
+
+
+def test_latest_keeps_the_extents_when_none_is_newer() -> None:
+    # Selecting the newest backup mostly leaves nothing out, and so copies no extents
+    tibx = _chain()
+    assert tibx.extents is tibx._unfiltered_extents()
+
+    tibx.use_recovery_point(1)
+    assert tibx.extents is not tibx._unfiltered_extents()
+
+
+def test_select_by_guid() -> None:
+    # A GUID names a backup for good, where an index shifts once older backups are deleted
+    tibx = _chain()
+    guid = tibx.recovery_points()[1].guid
+
+    for selector in (guid, str(guid), str(guid).upper(), f"{{{guid}}}", guid.hex):
+        tibx.use_recovery_point(selector)
+        assert tibx.recovery_point.slice_id == 3
+        assert {extent.slice_id for extent in tibx.extents} == {2, 3}
+
+
+def test_unknown_guid() -> None:
+    tibx = _chain()
+    with pytest.raises(InvalidArchiveError, match="no recovery point with GUID"):
+        tibx.use_recovery_point(uuid.UUID(int=0))
+
+
+def test_malformed_guid() -> None:
+    tibx = _chain()
+    with pytest.raises(InvalidArchiveError, match="invalid recovery point"):
+        tibx.use_recovery_point("not-a-guid-but-long-enough-to-look-like-one")
+
+
+def test_selected_recovery_point() -> None:
+    tibx = _chain()
+    points = tibx.recovery_points()
+
+    # "latest" reflects the newest backup that has finished
+    assert tibx.recovery_point is points[-1]
+
+    tibx.use_recovery_point(0)
+    assert tibx.recovery_point is points[0]
+
+    tibx.use_recovery_point("oldest")
+    assert tibx.recovery_point is points[0]
+
+    tibx.use_recovery_point("latest")
+    assert tibx.recovery_point is points[-1]
+
+
+def test_selected_recovery_point_with_one_not_finished() -> None:
+    tibx = _with_records(RECORDS)
+    points = tibx.recovery_points()
+    assert tibx.recovery_point is points[1]
+
+    tibx.use_recovery_point(2)
+    assert tibx.recovery_point is points[2]
+
+
+def test_selected_recovery_point_without_a_finished_backup() -> None:
+    tibx = _with_records([(2, c_tibx.SliceType.FULL, 0, b"\x02" * 16)])
+    assert tibx.recovery_point is None
+
+
+def test_selected_recovery_point_without_slices() -> None:
+    tibx = TIBX(io.BytesIO(build_lsm_archive([ExtentSpec(10, 0, b"x" * 64)])))
+    assert tibx.recovery_point is None
+
+
+def test_select_by_guid_of_a_replaced_backup() -> None:
+    # The deleted record carries the GUID of the backup that replaced it; the GUID selects that one
+    tibx = _with_records(RECORDS)
+    tibx.use_recovery_point(uuid.UUID(bytes_le=RESTARTED))
+
+    assert tibx.recovery_point.slice_id == 6
+    assert tibx.streams()[0].read(0, 7) == b"slice 6"
+
+
+def test_archive_uuid() -> None:
+    # Stored mixed-endian, like the GUIDs of the archive's backups
+    raw = bytes(range(16))
+    tibx = TIBX(io.BytesIO(build_lsm_archive([ExtentSpec(10, 0, b"x" * 64)], uuid=raw)))
+    assert tibx.uuid == uuid.UUID(bytes_le=raw)
+
+
+def test_recovery_point_statistics() -> None:
+    record = c_tibx.slice_record(
+        guid=b"\x01" * 16,
+        user_size=0x10000,
+        compr_size=0x4000,
+        items_added=3,
+        items_changed=2,
+        items_removed=1,
+        flags=c_tibx.SliceType.INCREMENTAL,
+    )
+    point = RecoveryPoint(0, 1, record)
+
+    assert point.size == 0x10000
+    assert point.compressed_size == 0x4000
+    assert (point.items_added, point.items_changed, point.items_removed) == (3, 2, 1)
+    assert point.type == "INCREMENTAL"
