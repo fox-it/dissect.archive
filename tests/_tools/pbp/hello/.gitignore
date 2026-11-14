@@ -1,0 +1,7 @@
+# Build artifacts of the PlayStation Portable toolchain
+*.elf
+*.o
+*.prx
+data.psp
+PARAM.SFO
+EBOOT.PBP
