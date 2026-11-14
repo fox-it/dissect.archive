@@ -462,7 +462,7 @@ class TIBX:
         self._clear_segment_cache()
         self._reset_imap_caches()
 
-    def recovery_points(self, show_hidden: bool = False, show_deleted: bool = False) -> list[RecoveryPoint]:
+    def recovery_points(self, *, show_hidden: bool = False, show_deleted: bool = False) -> list[RecoveryPoint]:
         """The backups in this archive, oldest first, as ``acrocmd list backups`` lists them.
 
         Read from the slices tree (TLV[5]), which is the archive's own record of its
