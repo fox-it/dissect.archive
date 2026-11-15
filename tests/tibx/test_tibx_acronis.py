@@ -122,6 +122,12 @@ def test_acronis_archive(name: str, backups: list[str], volumes: int) -> None:
         assert len(tibx.volumes()) == volumes
 
 
+def test_acronis_archive_uuid() -> None:
+    # As acrocmd names this archive in its messages
+    with _open("t1_enc_aes") as tibx:
+        assert str(tibx.uuid) == "155d544e-d42c-f635-bdc1-7efc2b6c892c"
+
+
 @pytest.mark.parametrize(
     ("name", "slots", "expected"),
     [

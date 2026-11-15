@@ -51,10 +51,11 @@ class _c_tibx(__cs__.cstruct):
         @overload
         def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
 
-    class SliceType(__cs__.Enum):
-        FULL = ...
+    class SliceFlags(__cs__.Flag):
+        HIDDEN = ...
         INCREMENTAL = ...
         DIFFERENTIAL = ...
+        DELETED = ...
 
     class slice_key(__cs__.Structure):
         slice_id: _c_tibx.uint32
@@ -74,7 +75,7 @@ class _c_tibx(__cs__.cstruct):
         items_added: _c_tibx.uint32
         items_changed: _c_tibx.uint32
         items_removed: _c_tibx.uint32
-        flags: _c_tibx.uint8
+        flags: _c_tibx.SliceFlags
         last_segment_id: _c_tibx.uint64
         features: _c_tibx.uint32
         data_size: _c_tibx.uint64
@@ -92,7 +93,7 @@ class _c_tibx(__cs__.cstruct):
             items_added: _c_tibx.uint32 | None = ...,
             items_changed: _c_tibx.uint32 | None = ...,
             items_removed: _c_tibx.uint32 | None = ...,
-            flags: _c_tibx.uint8 | None = ...,
+            flags: _c_tibx.SliceFlags | None = ...,
             last_segment_id: _c_tibx.uint64 | None = ...,
             features: _c_tibx.uint32 | None = ...,
             data_size: _c_tibx.uint64 | None = ...,
@@ -844,8 +845,6 @@ EXTENT_INDEX_WHOLE_SEGMENT: Literal[0xFFFF]
 
 SEGMENT_MAP_KEY_SIZE: int
 SEGMENT_MAP_VALUE_SIZE: int
-
-SLICE_TYPE_MASK: Literal[0x7F]
 
 IMAP_KEY_SIZE: int
 IMAP_VALUE_SIZE: int

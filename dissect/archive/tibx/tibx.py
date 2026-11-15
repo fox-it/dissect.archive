@@ -21,7 +21,7 @@ from collections import OrderedDict, defaultdict
 from itertools import compress, groupby, islice, repeat
 from operator import add, itemgetter, le, ne
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, NamedTuple
+from typing import TYPE_CHECKING, BinaryIO, Literal, NamedTuple
 
 from dissect.util.stream import AlignedStream, MappingStream
 
@@ -36,7 +36,6 @@ from dissect.archive.tibx.c_tibx import (
     MBR_SIGNATURE,
     MBR_TYPE_GPT_PROTECTIVE,
     PAGE_SIZE,
-    SLICE_TYPE_MASK,
     TLV_IMAP,
     TLV_KEYMAP,
     TLV_META,
@@ -91,6 +90,9 @@ SECTOR_SIZE = 512
 # volume's allocation bitmap by its span
 CLUSTER_SIZES = tuple(SECTOR_SIZE << shift for shift in range(13))
 
+# The type of a backup, as RecoveryPoint.type gives it
+BackupType = Literal["FULL", "INCREMENTAL", "DIFFERENTIAL"]
+
 
 class RecoveryPoint:
     """One backup in the archive: a *slice*, in the format's own terms.
@@ -103,6 +105,10 @@ class RecoveryPoint:
     Slice ids are not contiguous: a differential chain here numbered its two backups 2 and
     4. Address a point by its list index, and let :attr:`slice_id` stay whatever the
     archive says it is.
+
+    Two points are equal if they are the same backup: the same slice id and GUID, whatever
+    their index. Neither alone will do: a slice id is a counter that every archive starts
+    again, and a deleted backup can carry the GUID of the one that replaced it.
     """
 
     def __init__(self, index: int, slice_id: int, record: c_tibx.slice_record):
@@ -117,14 +123,46 @@ class RecoveryPoint:
             f"finished={self.finished} type={self.type}>"
         )
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, RecoveryPoint):
+            return NotImplemented
+        return (self.slice_id, self.guid) == (other.slice_id, other.guid)
+
+    def __hash__(self) -> int:
+        return hash((self.slice_id, self.guid))
+
     @property
-    def type(self) -> str:
+    def type(self) -> BackupType:
         """The type of this backup: ``"FULL"``, ``"INCREMENTAL"`` or ``"DIFFERENTIAL"``.
 
-        A type this parser does not know comes back as ``"unknown (<value>)"``.
+        The type the backup was asked for as, which is what Acronis shows, not the one its
+        slice was written as: a differential backup right after a full one is written as an
+        incremental.
         """
-        slice_type = c_tibx.SliceType(self._record.flags & SLICE_TYPE_MASK)
-        return slice_type.name or f"unknown ({int(slice_type):#x})"
+        flags = self._record.flags
+        if flags & c_tibx.SliceFlags.INCREMENTAL:
+            return "INCREMENTAL"
+        if flags & c_tibx.SliceFlags.DIFFERENTIAL:
+            return "DIFFERENTIAL"
+        return "FULL"
+
+    @property
+    def hidden(self) -> bool:
+        """Whether Acronis hides this slice: one written as a differential.
+
+        One nearly always comes just before a differential backup, and selecting it shows
+        the state before that backup. Only listed by ``recovery_points(show_hidden=True)``.
+        """
+        return self._record.flags & c_tibx.SliceFlags.HIDDEN == c_tibx.SliceFlags.HIDDEN
+
+    @property
+    def deleted(self) -> bool:
+        """Whether this backup was deleted. Only listed by ``recovery_points(show_deleted=True)``.
+
+        Its record stays in the slices tree, and can carry the GUID of the backup that
+        replaced it.
+        """
+        return bool(self._record.flags & c_tibx.SliceFlags.DELETED)
 
     @property
     def created(self) -> datetime.datetime:
@@ -132,9 +170,52 @@ class RecoveryPoint:
         return datetime.datetime.fromtimestamp(self._record.ctime_ms / 1000, datetime.timezone.utc)
 
     @property
-    def finished(self) -> datetime.datetime:
-        """When this backup finished."""
+    def finished(self) -> datetime.datetime | None:
+        """When this backup finished, or ``None`` if it has not finished.
+
+        ``acrocmd list backups`` does not list a backup that has not finished, and its data
+        may be incomplete.
+        """
+        if not self._record.ftime_ms:
+            return None
         return datetime.datetime.fromtimestamp(self._record.ftime_ms / 1000, datetime.timezone.utc)
+
+    @property
+    def size(self) -> int:
+        """The size of the data this backup took, before compression, as its record states it.
+
+        A backup states its own data only, not that of the backups it builds on: after a full
+        backup, an incremental one states what it added.
+        """
+        return self._record.user_size
+
+    @property
+    def compressed_size(self) -> int:
+        """The size of the data this backup took after compression, as its record states it.
+
+        Like :attr:`size`, of this backup's own data only. It is not the used space that
+        ``acrocmd`` shows for the backup.
+        """
+        return self._record.compr_size
+
+    @property
+    def items_added(self) -> int:
+        """How many items this backup added to the imap.
+
+        Items are what the imap records: the disks, partitions and Acronis metadata of a
+        disk backup, or the files and directories of a file-level backup.
+        """
+        return self._record.items_added
+
+    @property
+    def items_changed(self) -> int:
+        """How many imap items this backup changed. See :attr:`items_added` for what an item is."""
+        return self._record.items_changed
+
+    @property
+    def items_removed(self) -> int:
+        """How many imap items this backup removed. See :attr:`items_added` for what an item is."""
+        return self._record.items_removed
 
 
 class ItemStream(NamedTuple):
@@ -151,9 +232,9 @@ class ItemStream(NamedTuple):
 class TIBX:
     """An Acronis TIBX ("archive3") backup archive.
 
-    Opens at the latest recovery point. Use :meth:`recovery_points` to enumerate the
-    backups the archive records and :meth:`use_recovery_point` to select an earlier one
-    in a chain.
+    Opens at the latest recovery point, the newest backup that has finished. Use
+    :meth:`recovery_points` to enumerate the backups the archive records and
+    :meth:`use_recovery_point` to select an earlier one in a chain.
 
     Args:
         fh: A file-like object of the archive, or the ordered file-like objects of a
@@ -177,8 +258,9 @@ class TIBX:
         if files is not None:
             self._check_files(files)
 
-        self._recovery_points: list[RecoveryPoint] | None = None
-        self._slice_limit: int | None = None
+        self._slice_records: list[tuple[int, c_tibx.slice_record]] | None = None
+        # None while "latest" is selected
+        self._recovery_point: RecoveryPoint | None = None
         self._data_key = None
         self._reset_snapshot_caches()
 
@@ -280,6 +362,20 @@ class TIBX:
         self.close()
 
     @property
+    def uuid(self) -> uuid.UUID:
+        """The archive's UUID, from its live ARCH header.
+
+        Every ARCH header of the archive carries the same UUID, whichever backup wrote it, so
+        it names the archive as a whole, whatever its files are called. Of a split archive,
+        only the first file has a header; the later parts continue it without one.
+
+        It is read mixed-endian, like the GUIDs of its backups, which gives the UUID that
+        ``acrocmd`` names the archive by in its messages. Its 16 bytes are random, not an
+        RFC 4122 UUID, so its version and variant mean nothing.
+        """
+        return uuid.UUID(bytes_le=self.root.archive_uuid)
+
+    @property
     def encrypted(self) -> bool:
         """Whether this archive's data segments are encrypted.
 
@@ -366,19 +462,48 @@ class TIBX:
         self._clear_segment_cache()
         self._reset_imap_caches()
 
-    def recovery_points(self) -> list[RecoveryPoint]:
-        """The backups in this archive, oldest first.
+    def recovery_points(self, *, show_hidden: bool = False, show_deleted: bool = False) -> list[RecoveryPoint]:
+        """The backups in this archive, oldest first, as ``acrocmd list backups`` lists them.
 
         Read from the slices tree (TLV[5]), which is the archive's own record of its
         backups: one record per backup, keyed by slice id, carrying the same GUID that
         ``acrocmd list backups`` prints.
 
+        Not every record is a backup that Acronis lists. It leaves out records marked
+        deleted, and the slices it hides: those written as a differential (flags 0xb), one
+        of which nearly always comes just before a differential backup. These are left out
+        here too, unless ``show_hidden`` or ``show_deleted`` asks for them, as libarchive3's
+        options of the same names do. A backup that has not finished is not listed by
+        Acronis either, but is listed here, with a :attr:`~RecoveryPoint.finished` of
+        ``None``, so that its data can be selected. In every archive seen, it is the newest
+        backup.
+
         This deliberately does not enumerate ARCH commit roots. A commit root is a
         transactional checkpoint, not a backup, and Acronis writes a varying number of
         them per backup -- two for a single full backup here, four for a file-level one --
         so counting roots reports recovery points that were never taken.
+
+        Each point's :attr:`~RecoveryPoint.index` is its position in the list it is in.
+        Integer indexes, ``"oldest"``, ``"latest"`` and GUIDs passed to
+        :meth:`use_recovery_point` always refer to the default list; to select a hidden or
+        deleted slice, pass its :class:`RecoveryPoint`.
+
+        Args:
+            show_hidden: Also list the slices Acronis hides, see :attr:`RecoveryPoint.hidden`.
+            show_deleted: Also list deleted backups, see :attr:`RecoveryPoint.deleted`.
         """
-        if self._recovery_points is None:
+        points = [
+            point
+            for point in (RecoveryPoint(0, slice_id, record) for slice_id, record in self._read_slice_records())
+            if (show_hidden or not point.hidden) and (show_deleted or not point.deleted)
+        ]
+        for index, point in enumerate(points):
+            point.index = index
+        return points
+
+    def _read_slice_records(self) -> list[tuple[int, c_tibx.slice_record]]:
+        """Every slice record of the slices tree (TLV[5]), as ``(slice id, record)``, by slice id."""
+        if self._slice_records is None:
             records: dict[int, c_tibx.slice_record] = {}
             slices = self.header.tree(TLV_SLICES)
             if slices is not None and slices.has_records:
@@ -394,30 +519,61 @@ class TIBX:
                         continue
                     if len(cell.key) < len(c_tibx.slice_key):
                         continue
-                    key = c_tibx.slice_key(cell.key)
-                    records[key.slice_id] = c_tibx.slice_record(cell.value)
-            self._recovery_points = [
-                RecoveryPoint(index, slice_id, records[slice_id]) for index, slice_id in enumerate(sorted(records))
-            ]
-        return self._recovery_points
+                    records[c_tibx.slice_key(cell.key).slice_id] = c_tibx.slice_record(cell.value)
+            self._slice_records = sorted(records.items())
+        return self._slice_records
 
-    def use_recovery_point(self, recovery_point: int | str = "latest") -> None:
+    @property
+    def recovery_point(self) -> RecoveryPoint | None:
+        """The backup that volumes and reads reflect.
+
+        The one :meth:`use_recovery_point` selected, or while ``"latest"`` is selected, the
+        newest backup that has finished. ``None`` while ``"latest"`` is selected and no
+        backup has finished, so that volumes and reads reflect everything the archive holds.
+        """
+        if self._recovery_point is not None:
+            return self._recovery_point
+        return next((point for point in reversed(self.recovery_points()) if point.finished is not None), None)
+
+    def use_recovery_point(self, recovery_point: int | str | uuid.UUID | RecoveryPoint = "latest") -> None:
         """Select which recovery point volumes and reads reflect.
 
+        An index can shift between two looks at the same archive, as Acronis deletes old
+        backups to its retention rules. A GUID does not, so it is the way to name a backup
+        that has to be found again later.
+
         Args:
-            recovery_point: ``"latest"`` (the live root, default), ``"oldest"``, or an
-                integer index into :meth:`recovery_points`.
+            recovery_point: ``"latest"`` (the default), ``"oldest"``, an integer index into
+                :meth:`recovery_points`, or the GUID of a backup, as a :class:`~uuid.UUID` or
+                a string such as ``acrocmd list backups`` prints. ``"latest"`` is the newest
+                backup that has finished, the newest one ``acrocmd list backups`` lists; if no
+                backup has finished, everything the archive holds. Or a
+                :class:`RecoveryPoint` of this archive, which is how a hidden or deleted
+                slice is selected.
 
         Raises:
-            ~dissect.archive.tibx.exception.InvalidArchiveError: If an integer index is out of range.
+            ~dissect.archive.tibx.exception.InvalidArchiveError: If an integer index is out of range,
+                or no backup has the GUID.
         """
-        if recovery_point == "latest":
-            self._slice_limit = None
+        if isinstance(recovery_point, RecoveryPoint):
+            self._recovery_point = recovery_point
+        elif recovery_point == "latest":
+            self._recovery_point = None
         else:
             points = self.recovery_points()
             if not points:
                 raise InvalidArchiveError("archive records no backups to select from")
-            if recovery_point == "oldest":
+            if isinstance(recovery_point, str):
+                # A GUID, however it is written; an index or "oldest" never parses as one
+                try:
+                    recovery_point = uuid.UUID(recovery_point)
+                except ValueError:
+                    pass
+            if isinstance(recovery_point, uuid.UUID):
+                chosen = next((point for point in points if point.guid == recovery_point), None)
+                if chosen is None:
+                    raise InvalidArchiveError(f"no recovery point with GUID {recovery_point}")
+            elif recovery_point == "oldest":
                 chosen = points[0]
             else:
                 try:
@@ -430,8 +586,14 @@ class TIBX:
             # Extents carry the slice that wrote them, and resolve_extents already treats
             # slice_id as the primary recency signal -- so dropping everything newer than
             # the chosen slice is exactly the archive as it stood after that backup.
-            self._slice_limit = chosen.slice_id
+            self._recovery_point = chosen
         self._reset_view_caches()
+
+    @property
+    def _slice_limit(self) -> int | None:
+        """The slice id of the selected backup, or ``None`` if nothing is left out of view."""
+        point = self.recovery_point
+        return None if point is None else point.slice_id
 
     def disks(self) -> list:
         """Whole-disk views of this archive.
@@ -448,8 +610,10 @@ class TIBX:
         """The data_map extents in view: all of them, or those up to the selected slice."""
         if self._extents is None:
             extents = self._unfiltered_extents()
-            if self._slice_limit is not None:
-                extents = extents.select(map(le, extents.slice_ids, repeat(self._slice_limit)))
+            limit = self._slice_limit
+            # With the newest backup selected, mostly no extent is newer and nothing needs copying
+            if limit is not None and max(extents.slice_ids, default=limit) > limit:
+                extents = extents.select(map(le, extents.slice_ids, repeat(limit)))
             self._extents = extents
         return self._extents
 
@@ -545,11 +709,12 @@ class TIBX:
             return []
         # An item's version in a backup is its newest record up to that backup, as Acronis
         # lists items; one that is deleted or incomplete is not there
+        limit = self._slice_limit
         versions: dict[bytes, ItemStream] = {}
         for record in records:
             if (
                 record.index == 0
-                and (self._slice_limit is None or record.slice_id <= self._slice_limit)
+                and (limit is None or record.slice_id <= limit)
                 and PARTITION_NAME_RE.fullmatch(record.name)
             ):
                 version = versions.get(record.name)
@@ -609,11 +774,11 @@ class TIBX:
             except InvalidPasswordError:
                 return None
             # Oldest backup first, so the newest one in view decides
+            limit = self._slice_limit
             self._stream_sizes = {
                 record.id: record.size
                 for record in sorted(records)
-                if (self._slice_limit is None or record.slice_id <= self._slice_limit)
-                and not record.flags & c_tibx.ItemFlags.DELETED
+                if (limit is None or record.slice_id <= limit) and not record.flags & c_tibx.ItemFlags.DELETED
             }
         return self._stream_sizes.get(volume_id)
 
