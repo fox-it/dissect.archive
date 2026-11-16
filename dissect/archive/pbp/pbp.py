@@ -1,5 +1,13 @@
-# References:
-# - https://github.com/hrydgard/ppsspp/blob/master/Core/ELF/PBPReader.cpp
+"""Sony PSP Boot Package (PBP) files.
+
+A PBP stores up to eight subfiles: the metadata (PARAM.SFO), the icons, backgrounds and sound that the XMB
+shows (ICON0.PNG, ICON1.PMF, PIC0.PNG, PIC1.PNG, SND0.AT3), the executable (DATA.PSP) and an archive
+(DATA.PSAR). The DATA.PSAR of a PSN ``EBOOT.PBP`` is a UMD image, see :mod:`dissect.archive.psar.psar`.
+
+References:
+    - https://github.com/hrydgard/ppsspp/blob/master/Core/ELF/PBPReader.cpp
+"""
+
 from __future__ import annotations
 
 import io
@@ -26,11 +34,7 @@ SUBFILES = (
 
 
 class PBP:
-    """Sony PSP Boot Package (PBP) file implementation.
-
-    A PBP stores up to eight subfiles: the metadata (PARAM.SFO), the icons, backgrounds and sound that the XMB
-    shows (ICON0.PNG, ICON1.PMF, PIC0.PNG, PIC1.PNG, SND0.AT3), the executable (DATA.PSP) and an archive
-    (DATA.PSAR). The DATA.PSAR of a PSN ``EBOOT.PBP`` is a UMD image, see :class:`dissect.archive.psar.PSAR`.
+    """PBP file implementation.
 
     Args:
         fh: The file-like object of the PBP file to read.

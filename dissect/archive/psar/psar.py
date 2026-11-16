@@ -1,7 +1,15 @@
-# References:
-# - https://github.com/hrydgard/ppsspp/blob/master/Core/FileSystems/BlockDevices.cpp
-# - https://github.com/swarzesherz/sign_np/blob/master/sign_np.c
-# - https://github.com/LunaMoo/iPBP/blob/main/src/convert.cpp
+"""Sony PSP NPDRM UMD (NPUMDIMG) images.
+
+A NPUMDIMG image is the ``DATA.PSAR`` of a PSN ``EBOOT.PBP``, and stores a UMD (ISO 9660) image in
+blocks that are optionally compressed with :func:`dissect.util.compression.lzrc` and encrypted with
+NPDRM. The image starts with a header and a block table, which are followed by the blocks.
+
+References:
+    - https://github.com/hrydgard/ppsspp/blob/master/Core/FileSystems/BlockDevices.cpp
+    - https://github.com/swarzesherz/sign_np/blob/master/sign_np.c
+    - https://github.com/LunaMoo/iPBP/blob/main/src/convert.cpp
+"""
+
 from __future__ import annotations
 
 from functools import cached_property
@@ -29,11 +37,7 @@ class PSARError(Error):
 
 
 class PSAR:
-    """Sony PSP NPDRM UMD (NPUMDIMG) image implementation.
-
-    A NPUMDIMG image is the ``DATA.PSAR`` of a PSN ``EBOOT.PBP``, and stores a UMD (ISO 9660) image in
-    blocks that are optionally compressed with :func:`dissect.util.compression.lzrc` and encrypted with
-    NPDRM. The image starts with a header and a block table, which are followed by the blocks.
+    """NPUMDIMG image implementation.
 
     Args:
         fh: The file-like object of the NPUMDIMG image to read.

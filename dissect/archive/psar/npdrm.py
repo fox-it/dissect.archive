@@ -1,6 +1,13 @@
-# References:
-# - https://github.com/swarzesherz/sign_np/blob/master/libkirk/amctrl.c
-# - https://github.com/hrydgard/ppsspp/blob/master/ext/libkirk/amctrl.c
+"""Sony PSP NPDRM cryptography.
+
+A NPUMDIMG image is protected with NPDRM, which uses the AES keys of the KIRK key vault. The version key
+is recovered from the BBMac of the image header, and the header and blocks are encrypted with a BBCipher.
+
+References:
+    - https://github.com/swarzesherz/sign_np/blob/master/libkirk/amctrl.c
+    - https://github.com/hrydgard/ppsspp/blob/master/ext/libkirk/amctrl.c
+"""
+
 from __future__ import annotations
 
 try:
